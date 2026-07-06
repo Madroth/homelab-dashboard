@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Homelab Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Marked.js for parsing Markdown -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <i class="fa-solid fa-server logo-icon"></i>
+                <h2>OmegaLab</h2>
+            </div>
+            
+            <nav class="sidebar-nav">
+                <a href="#" class="nav-item active" id="nav-intake">
+                    <i class="fa-solid fa-book-open"></i>
+                    <span>Article Intake</span>
+                </a>
+                <a href="#" class="nav-item" id="nav-mods">
+                    <i class="fa-solid fa-gamepad"></i>
+                    <span>Mod Pipeline</span>
+                </a>
+                <a href="#" class="nav-item disabled">
+                    <i class="fa-solid fa-chart-line"></i>
+                    <span>System Status</span>
+                </a>
+                <a href="#" class="nav-item disabled">
+                    <i class="fa-brands fa-docker"></i>
+                    <span>Containers</span>
+                </a>
+                <a href="#" class="nav-item disabled">
+                    <i class="fa-solid fa-network-wired"></i>
+                    <span>Network</span>
+                </a>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <div class="status-indicator">
+                    <span class="dot pulse"></span> All Systems Operational
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <header class="topbar">
+                <div class="search-bar">
+                    <i class="fa-solid fa-search"></i>
+                    <input type="text" id="search-input" placeholder="Search articles, topics, or ideas...">
+                </div>
+                <div class="user-profile">
+                    <img src="https://ui-avatars.com/api/?name=Admin&background=random" alt="User">
+                </div>
+            </header>
+
+            <div class="content-wrapper" id="view-intake">
+                <div class="layout-grid">
+                    <!-- Left Column: Article Feed -->
+                    <div class="feed-column">
+                        <div id="queue-section" style="border-bottom: 1px solid var(--border-color); background: rgba(0,0,0,0.2);">
+                            <div class="section-header" style="padding: 12px 24px;">
+                                <h3 style="font-size: 14px; color: #a5b4fc;"><i class="fa-solid fa-list-check"></i> Processing Queue</h3>
+                            </div>
+                            <div id="queue-list" style="padding: 12px 24px; display: flex; flex-direction: column; gap: 8px;">
+                                <!-- Queue items here -->
+                            </div>
+                        </div>
+
+                        <div class="section-header">
+                            <h3><i class="fa-solid fa-rss"></i> Recent Intakes</h3>
+                            <button id="refresh-btn" class="btn-icon"><i class="fa-solid fa-rotate-right"></i></button>
+                        </div>
+                        <div id="articles-list" class="articles-list">
+                            <!-- Articles will be injected here via JS -->
+                            <div class="loading-state">
+                                <div class="spinner"></div>
+                                <p>Loading articles...</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right Column: Reader View -->
+                    <div class="reader-column">
+                        <div id="reader-view" class="reader-view empty-state">
+                            <i class="fa-solid fa-file-lines empty-icon"></i>
+                            <h3>Select an article to read</h3>
+                            <p>Summaries and homelab ideation will appear here.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="content-wrapper" id="view-mods" style="display: none;">
+                <div class="layout-grid" style="grid-template-columns: 1fr;">
+                    <div class="feed-column">
+                        <div class="section-header">
+                            <h3><i class="fa-solid fa-hourglass-half" style="color: #f59e0b;"></i> Pending Reviews</h3>
+                        </div>
+                        <div id="staging-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; padding: 24px; border-bottom: 1px solid var(--border-color); background: rgba(0,0,0,0.2);">
+                            <!-- Pending injected via JS -->
+                        </div>
+
+                        <div class="section-header">
+                            <h3><i class="fa-solid fa-gamepad"></i> Mod Pipeline History</h3>
+                            <button id="refresh-mods-btn" class="btn-icon"><i class="fa-solid fa-rotate-right"></i></button>
+                        </div>
+                        <div id="mods-list" class="articles-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; padding: 24px;">
+                            <!-- Mods injected via JS -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
