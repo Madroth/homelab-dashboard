@@ -46,14 +46,15 @@ def list_articles():
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()
             
-            # Very basic extraction
             title_match = re.search(r'^#\s+(.*)', content, re.MULTILINE)
             source_match = re.search(r'\*\*Source:\*\*\s+(.*)', content)
             date_match = re.search(r'\*\*Date:\*\*\s+(.*)', content)
+            dup_match = re.search(r'\*\*Duplicate:\*\*\s+(True|False)', content)
             
             title = title_match.group(1) if title_match else filename.replace('.md', '')
             source = source_match.group(1) if source_match else ''
             date = date_match.group(1) if date_match else ''
+            is_duplicate = dup_match.group(1) == 'True' if dup_match else False
             
             # Create a short snippet from the local summary
             summary_match = re.search(r'## Local AI Summary.*?$(.*?)(?:##|$)', content, re.MULTILINE | re.DOTALL)
@@ -67,6 +68,7 @@ def list_articles():
                 'date': date,
                 'source': source,
                 'snippet': snippet,
+                'is_duplicate': is_duplicate,
                 'raw_content': content.lower()
             })
             
@@ -95,9 +97,14 @@ def delete_article(filename):
 def mark_duplicate(filename):
     filepath = os.path.join(ARTICLES_DIR, filename)
     if os.path.exists(filepath):
-        new_filename = f"duplicate-{filename}"
-        new_filepath = os.path.join(ARTICLES_DIR, new_filename)
-        os.rename(filepath, new_filepath)
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+        if '**Duplicate:**' in content:
+            content = re.sub(r'\*\*Duplicate:\*\*\s+(True|False)', '**Duplicate:** True', content)
+        else:
+            content = content.replace('\n## Local AI Summary', '\n**Duplicate:** True\n\n## Local AI Summary', 1)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
         return jsonify({'success': True})
     return jsonify({'error': 'Not found'}), 404
 

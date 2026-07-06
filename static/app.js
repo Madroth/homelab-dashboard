@@ -113,7 +113,10 @@ document.addEventListener('DOMContentLoaded', () => {
             card.dataset.id = article.id;
             
             card.innerHTML = `
-                <div class="article-title">${article.title}</div>
+                <div class="article-title" style="display: flex; justify-content: space-between; align-items: flex-start;">
+                    <span>${article.title}</span>
+                    ${article.is_duplicate ? '<span style="background: rgba(245, 158, 11, 0.2); color: #f59e0b; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; text-transform: uppercase; border: 1px solid rgba(245, 158, 11, 0.5); white-space: nowrap; margin-left: 8px;">Duplicate</span>' : ''}
+                </div>
                 <div class="article-meta">
                     <span>${formatDate(article.date) || 'Unknown date'}</span>
                 </div>
@@ -158,11 +161,10 @@ document.addEventListener('DOMContentLoaded', () => {
             `;
             
             document.getElementById('btn-mark-duplicate').addEventListener('click', async () => {
-                if(confirm('Mark this article as a duplicate? It will be hidden from the feed but still block future submissions of the same link.')) {
+                if(confirm('Mark this article as a duplicate? It will be visually marked in the feed and block future submissions.')) {
                     document.getElementById('btn-mark-duplicate').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Working...';
                     await fetch(`/api/articles/${filename}/duplicate`, { method: 'POST' });
-                    readerViewEl.innerHTML = '<div class="empty-state"><i class="fa-solid fa-check" style="font-size: 32px; color: #10b981; margin-bottom: 16px;"></i><p>Article marked as duplicate.</p></div>';
-                    fetchArticles();
+                    fetchArticles().then(() => loadArticle(filename));
                 }
             });
 
