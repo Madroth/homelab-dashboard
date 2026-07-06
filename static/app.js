@@ -149,7 +149,31 @@ document.addEventListener('DOMContentLoaded', () => {
             
             // Render markdown to HTML
             const htmlContent = marked.parse(data.content);
-            readerViewEl.innerHTML = `<div class="markdown-body">${htmlContent}</div>`;
+            readerViewEl.innerHTML = `
+                <div class="article-actions" style="display: flex; gap: 8px; margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.1);">
+                    <button id="btn-mark-duplicate" style="background: rgba(245, 158, 11, 0.2); border: 1px solid #f59e0b; color: #f59e0b; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.2s;"><i class="fa-solid fa-copy" style="margin-right: 4px;"></i> Mark Duplicate</button>
+                    <button id="btn-delete-article" style="background: rgba(239, 68, 68, 0.2); border: 1px solid #ef4444; color: #ef4444; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.2s;"><i class="fa-solid fa-trash" style="margin-right: 4px;"></i> Delete</button>
+                </div>
+                <div class="markdown-body">${htmlContent}</div>
+            `;
+            
+            document.getElementById('btn-mark-duplicate').addEventListener('click', async () => {
+                if(confirm('Mark this article as a duplicate? It will be hidden from the feed but still block future submissions of the same link.')) {
+                    document.getElementById('btn-mark-duplicate').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Working...';
+                    await fetch(`/api/articles/${filename}/duplicate`, { method: 'POST' });
+                    readerViewEl.innerHTML = '<div class="empty-state"><i class="fa-solid fa-check" style="font-size: 32px; color: #10b981; margin-bottom: 16px;"></i><p>Article marked as duplicate.</p></div>';
+                    fetchArticles();
+                }
+            });
+
+            document.getElementById('btn-delete-article').addEventListener('click', async () => {
+                if(confirm('Permanently delete this article?')) {
+                    document.getElementById('btn-delete-article').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Working...';
+                    await fetch(`/api/articles/${filename}`, { method: 'DELETE' });
+                    readerViewEl.innerHTML = '<div class="empty-state"><i class="fa-solid fa-trash" style="font-size: 32px; color: #ef4444; margin-bottom: 16px;"></i><p>Article deleted.</p></div>';
+                    fetchArticles();
+                }
+            });
             
             // Scroll to top
             readerViewEl.parentElement.scrollTop = 0;

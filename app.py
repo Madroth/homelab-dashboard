@@ -40,6 +40,9 @@ def list_articles():
     articles = []
     for filepath in files:
         filename = os.path.basename(filepath)
+        if filename.startswith('duplicate-'):
+            continue
+            
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()
             
@@ -79,6 +82,24 @@ def get_article(filename):
         content = f.read()
         
     return jsonify({'content': content})
+
+@app.route('/api/articles/<filename>', methods=['DELETE'])
+def delete_article(filename):
+    filepath = os.path.join(ARTICLES_DIR, filename)
+    if os.path.exists(filepath):
+        os.remove(filepath)
+        return jsonify({'success': True})
+    return jsonify({'error': 'Not found'}), 404
+
+@app.route('/api/articles/<filename>/duplicate', methods=['POST'])
+def mark_duplicate(filename):
+    filepath = os.path.join(ARTICLES_DIR, filename)
+    if os.path.exists(filepath):
+        new_filename = f"duplicate-{filename}"
+        new_filepath = os.path.join(ARTICLES_DIR, new_filename)
+        os.rename(filepath, new_filepath)
+        return jsonify({'success': True})
+    return jsonify({'error': 'Not found'}), 404
 
 @app.route('/api/queue')
 def get_queue():
