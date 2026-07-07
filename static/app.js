@@ -8,6 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Mod Pipeline Elements
     const navIntake = document.getElementById('nav-intake');
+    const navAutoResearch = document.getElementById('nav-auto-research');
     const navMods = document.getElementById('nav-mods');
     const viewIntake = document.getElementById('view-intake');
     const viewMods = document.getElementById('view-mods');
@@ -17,6 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let allArticles = [];
     let allMods = {};
+    let currentFilter = 'manual'; // 'manual' or 'auto'
 
     // Configure marked to use GitHub flavored markdown
     marked.setOptions({
@@ -36,12 +38,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!response.ok) throw new Error('Network response was not ok');
             
             allArticles = await response.json();
-            renderArticlesList(allArticles);
+            applyArticleFilter();
             
-            // Auto-select first article if available
-            if (allArticles.length > 0) {
-                loadArticle(allArticles[0].id);
-            }
+            // auto selection handled in applyArticleFilter
         } catch (error) {
             articlesListEl.innerHTML = `<div class="loading-state" style="color: #ef4444;"><i class="fa-solid fa-circle-exclamation" style="font-size: 24px; margin-bottom: 12px;"></i><p>Failed to load articles.</p></div>`;
             console.error('Error fetching articles:', error);
@@ -97,6 +96,29 @@ document.addEventListener('DOMContentLoaded', () => {
             `;
             queueListEl.appendChild(el);
         });
+    }
+
+    function applyArticleFilter() {
+        const filtered = allArticles.filter(article => {
+            if (currentFilter === 'manual') return !article.auto_generated;
+            if (currentFilter === 'auto') return article.auto_generated;
+            return true;
+        });
+        
+        // Also apply search filter if present
+        const term = searchInput.value.toLowerCase();
+        const finalFiltered = filtered.filter(article => 
+            article.title.toLowerCase().includes(term) || 
+            (article.raw_content && article.raw_content.includes(term))
+        );
+        
+        renderArticlesList(finalFiltered);
+        
+        if (finalFiltered.length > 0) {
+            loadArticle(finalFiltered[0].id);
+        } else {
+            readerViewEl.innerHTML = '<div class="empty-state"><i class="fa-solid fa-file-lines empty-icon"></i><h3>Select an article to read</h3><p>Summaries and homelab ideation will appear here.</p></div>';
+        }
     }
 
     // Render the list of articles in the feed
@@ -203,11 +225,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // Article search
-        const filtered = allArticles.filter(article => 
-            article.title.toLowerCase().includes(term) || 
-            (article.raw_content && article.raw_content.includes(term))
-        );
-        renderArticlesList(filtered);
+        applyArticleFilter();
     });
 
     refreshBtn.addEventListener('click', () => {
@@ -221,16 +239,33 @@ document.addEventListener('DOMContentLoaded', () => {
     // Navigation Switching
     navIntake.addEventListener('click', (e) => {
         e.preventDefault();
+        currentFilter = 'manual';
         navIntake.classList.add('active');
+        if (navAutoResearch) navAutoResearch.classList.remove('active');
         navMods.classList.remove('active');
         viewIntake.style.display = 'flex';
         viewMods.style.display = 'none';
+        applyArticleFilter();
     });
+
+    if (navAutoResearch) {
+        navAutoResearch.addEventListener('click', (e) => {
+            e.preventDefault();
+            currentFilter = 'auto';
+            navAutoResearch.classList.add('active');
+            navIntake.classList.remove('active');
+            navMods.classList.remove('active');
+            viewIntake.style.display = 'flex';
+            viewMods.style.display = 'none';
+            applyArticleFilter();
+        });
+    }
 
     navMods.addEventListener('click', (e) => {
         e.preventDefault();
         navMods.classList.add('active');
         navIntake.classList.remove('active');
+        if (navAutoResearch) navAutoResearch.classList.remove('active');
         viewMods.style.display = 'flex';
         viewIntake.style.display = 'none';
         fetchMods();
