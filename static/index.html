@@ -1,131 +1,167 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Homelab Dashboard</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <!-- FontAwesome for icons -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <!-- Marked.js for parsing Markdown -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <link rel="stylesheet" href="/static/style.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OmegaLab Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <div class="dashboard-container">
-        <!-- Sidebar -->
-        <aside class="sidebar">
-            <div class="sidebar-header">
-                <i class="fa-solid fa-server logo-icon"></i>
-                <h2>OmegaLab</h2>
-            </div>
-            
-            <nav class="sidebar-nav">
-                <a href="#" class="nav-item active" id="nav-intake">
-                    <i class="fa-solid fa-book-open"></i>
-                    <span>Article Intake</span>
-                </a>
-                <a href="#" class="nav-item" id="nav-auto-research">
-                    <i class="fa-solid fa-robot"></i>
-                    <span>Automated Research</span>
-                </a>
-                <a href="#" class="nav-item" id="nav-mods">
-                    <i class="fa-solid fa-gamepad"></i>
-                    <span>Mod Pipeline</span>
-                </a>
-                <a href="#" class="nav-item disabled">
-                    <i class="fa-solid fa-chart-line"></i>
-                    <span>System Status</span>
-                </a>
-                <a href="#" class="nav-item disabled">
-                    <i class="fa-brands fa-docker"></i>
-                    <span>Containers</span>
-                </a>
-                <a href="#" class="nav-item disabled">
-                    <i class="fa-solid fa-network-wired"></i>
-                    <span>Network</span>
-                </a>
-            </nav>
-            
-            <div class="sidebar-footer">
-                <div class="status-indicator">
-                    <span class="dot pulse"></span> All Systems Operational
-                </div>
-            </div>
-        </aside>
 
-        <!-- Main Content -->
-        <main class="main-content">
-            <header class="topbar">
-                <div class="search-bar">
-                    <i class="fa-solid fa-search"></i>
-                    <input type="text" id="search-input" placeholder="Search articles, topics, or ideas...">
-                </div>
-                <div class="user-profile">
-                    <img src="https://ui-avatars.com/api/?name=Admin&background=random" alt="User">
-                </div>
-            </header>
+<div style="width:100vw;height:100vh;background:#1e1e2e;display:flex;font-family:'Inter',sans-serif;color:#e4e4f0;overflow:hidden;position:relative">
 
-            <div class="content-wrapper" id="view-intake">
-                <div class="layout-grid">
-                    <!-- Left Column: Article Feed -->
-                    <div class="feed-column">
-                        <div id="queue-section" style="border-bottom: 1px solid var(--border-color); background: rgba(0,0,0,0.2);">
-                            <div class="section-header" style="padding: 12px 24px;">
-                                <h3 style="font-size: 14px; color: #a5b4fc;"><i class="fa-solid fa-list-check"></i> Processing Queue</h3>
-                            </div>
-                            <div id="queue-list" style="padding: 12px 24px; display: flex; flex-direction: column; gap: 8px;">
-                                <!-- Queue items here -->
-                            </div>
-                        </div>
+  <!-- SIDEBAR -->
+  <div style="width:212px;flex:none;display:flex;flex-direction:column;background:#191925;border-right:1px solid rgba(255,255,255,0.06)">
+    <div style="display:flex;align-items:center;gap:9px;padding:20px 18px 16px">
+      <div style="width:30px;height:30px;border-radius:8px;background:rgba(165,180,252,0.14);display:flex;align-items:center;justify-content:center;color:#a5b4fc;font-size:14px"><i class="fa-solid fa-server"></i></div>
+      <div style="font-weight:700;font-size:14px;letter-spacing:0.2px">OmegaLab</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:1px;padding:6px 10px">
+        <div id="nav-home" class="nav-item" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:7px;font-size:12.5px;font-weight:500;cursor:pointer;color:#9399b2;background:transparent">
+          <i class="fa-solid fa-gauge-high" style="width:14px;font-size:12px"></i>
+          <span>Dashboard</span>
+        </div>
+        <div id="nav-intake" class="nav-item active" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:7px;font-size:12.5px;font-weight:500;cursor:pointer;color:#e4e4f0;background:rgba(165,180,252,0.1)">
+          <i class="fa-solid fa-newspaper" style="width:14px;font-size:12px"></i>
+          <span>Article Intake</span>
+          <span id="nav-intake-badge" style="display:none;margin-left:auto;background:#f38ba8;color:#1e1e2e;font-size:10px;font-weight:800;border-radius:9px;padding:1px 6px">0</span>
+        </div>
+        <div id="nav-mods" class="nav-item" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:7px;font-size:12.5px;font-weight:500;cursor:pointer;color:#9399b2;background:transparent">
+          <i class="fa-solid fa-cubes" style="width:14px;font-size:12px"></i>
+          <span>Mod Pipeline</span>
+          <span id="nav-mods-badge" style="display:none;margin-left:auto;background:#f9c97c;color:#1e1e2e;font-size:10px;font-weight:800;border-radius:9px;padding:1px 6px">0</span>
+        </div>
+        <div class="nav-item disabled" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:7px;font-size:12.5px;font-weight:500;cursor:not-allowed;color:#4c4f61;background:transparent">
+          <i class="fa-solid fa-heart-pulse" style="width:14px;font-size:12px"></i>
+          <span>System Status</span>
+        </div>
+        <div class="nav-item disabled" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:7px;font-size:12.5px;font-weight:500;cursor:not-allowed;color:#4c4f61;background:transparent">
+          <i class="fa-solid fa-boxes-stacked" style="width:14px;font-size:12px"></i>
+          <span>Containers</span>
+        </div>
+        <div class="nav-item disabled" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:7px;font-size:12.5px;font-weight:500;cursor:not-allowed;color:#4c4f61;background:transparent">
+          <i class="fa-solid fa-network-wired" style="width:14px;font-size:12px"></i>
+          <span>Network</span>
+        </div>
+    </div>
+    <div style="padding:12px 18px">
+      <div onclick="window.open('https://100.87.245.107:8443', '_blank')" class="nav-btn-hover" style="border:1px solid rgba(165,180,252,0.3);border-radius:8px;padding:9px 10px;display:flex;align-items:center;gap:8px;cursor:pointer;color:#a5b4fc;font-size:12px;font-weight:600">
+        <i class="fa-solid fa-cube"></i>
+        <span style="flex:1">Crafty Controller</span>
+        <i class="fa-solid fa-arrow-up-right-from-square" style="font-size:9px"></i>
+      </div>
+    </div>
+    <div style="flex:1"></div>
+    <div style="padding:14px 18px 18px;display:flex;align-items:center;gap:8px;border-top:1px solid rgba(255,255,255,0.06)">
+      <div style="width:7px;height:7px;border-radius:50%;background:#a6e3a1;animation:omegaPulse 2s infinite"></div>
+      <span style="font-size:11.5px;color:#9399b2;font-weight:500">System Operational</span>
+    </div>
+  </div>
 
-                        <div class="section-header">
-                            <h3><i class="fa-solid fa-rss"></i> Recent Intakes</h3>
-                            <button id="refresh-btn" class="btn-icon"><i class="fa-solid fa-rotate-right"></i></button>
-                        </div>
-                        <div id="articles-list" class="articles-list">
-                            <!-- Articles will be injected here via JS -->
-                            <div class="loading-state">
-                                <div class="spinner"></div>
-                                <p>Loading articles...</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Right Column: Reader View -->
-                    <div class="reader-column">
-                        <div id="reader-view" class="reader-view empty-state">
-                            <i class="fa-solid fa-file-lines empty-icon"></i>
-                            <h3>Select an article to read</h3>
-                            <p>Summaries and homelab ideation will appear here.</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="content-wrapper" id="view-mods" style="display: none;">
-                <div class="layout-grid" style="grid-template-columns: 1fr;">
-                    <div class="feed-column">
-                        <div class="section-header">
-                            <h3><i class="fa-solid fa-hourglass-half" style="color: #f59e0b;"></i> Pending Reviews</h3>
-                        </div>
-                        <div id="staging-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; padding: 24px; border-bottom: 1px solid var(--border-color); background: rgba(0,0,0,0.2);">
-                            <!-- Pending injected via JS -->
-                        </div>
-
-                        <div class="section-header">
-                            <h3><i class="fa-solid fa-gamepad"></i> Mod Pipeline History</h3>
-                            <button id="refresh-mods-btn" class="btn-icon"><i class="fa-solid fa-rotate-right"></i></button>
-                        </div>
-                        <div id="mods-list" class="articles-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; padding: 24px;">
-                            <!-- Mods injected via JS -->
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </main>
+  <!-- MAIN -->
+  <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+    <div style="height:56px;flex:none;display:flex;align-items:center;gap:14px;padding:0 24px;border-bottom:1px solid rgba(255,255,255,0.06)">
+      <div style="flex:1;max-width:380px;display:flex;align-items:center;gap:8px;background:#242435;border:1px solid rgba(255,255,255,0.07);border-radius:7px;padding:7px 11px;color:#6c7086" class="search-container">
+        <i class="fa-solid fa-magnifying-glass" style="font-size:11px"></i>
+        <input id="search-input" placeholder="Search articles, topics, ideas…" style="background:transparent;border:none;outline:none;color:#e4e4f0;font-size:12px;font-family:'Inter',sans-serif;flex:1"></input>
+        <i class="fa-solid fa-xmark search-clear" id="search-clear" style="display:none;cursor:pointer;font-size:11px"></i>
+      </div>
+      <div style="flex:1"></div>
+      <div style="width:30px;height:30px;border-radius:50%;background:#a5b4fc;color:#1e1e2e;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px">P</div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <!-- HOME VIEW -->
+    <div id="view-home" style="display:none;flex:1;overflow:auto;padding:24px" class="custom-scroll">
+      <div style="display:flex;align-items:center;gap:14px;background:#242435;border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:12px 18px;margin-bottom:20px;font-size:12.5px;flex-wrap:wrap">
+        <span style="color:#9399b2;font-weight:600">Articles <b id="home-articles-count" style="color:#e4e4f0;font-weight:700">0</b></span>
+        <span style="display:flex;align-items:center;gap:5px;color:#f9c97c"><span style="width:6px;height:6px;border-radius:50%;background:#f9c97c;animation:omegaPulseAmber 2s infinite"></span><span id="home-queue-count">0</span> processing</span>
+        <span style="width:1px;height:14px;background:rgba(255,255,255,0.1)"></span>
+        <span style="color:#9399b2;font-weight:600">Mods <b id="home-mods-count" style="color:#f9c97c;font-weight:700">0</b> pending</span>
+        <span style="width:1px;height:14px;background:rgba(255,255,255,0.1)"></span>
+        <span style="color:#9399b2;font-weight:600">Minecraft <b id="mc-status-bar" style="color:#a6e3a1;font-weight:700">Online</b> · <span id="mc-players-bar">0/0</span></span>
+        <div style="flex:1"></div>
+        <div onclick="window.open('https://100.87.245.107:8443', '_blank')" style="color:#a5b4fc;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:6px" class="hover-underline">Launch Crafty <i class="fa-solid fa-arrow-up-right-from-square" style="font-size:9px"></i></div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">
+        <div id="home-module-articles" style="background:#242435;border:1px solid rgba(255,255,255,0.06);border-radius:11px;padding:16px;cursor:pointer;transition:border-color 0.2s">
+          <div style="display:flex;align-items:center;gap:8px;color:#a5b4fc;font-size:11.5px;font-weight:700;margin-bottom:10px"><i class="fa-solid fa-newspaper"></i>LATEST ARTICLES</div>
+          <div id="home-latest-articles"></div>
+        </div>
+        
+        <div id="home-module-mods" style="background:#242435;border:1px solid rgba(255,255,255,0.06);border-radius:11px;padding:16px;cursor:pointer;transition:border-color 0.2s">
+          <div style="display:flex;align-items:center;gap:8px;color:#f9c97c;font-size:11.5px;font-weight:700;margin-bottom:10px"><i class="fa-solid fa-cubes"></i>PENDING MOD REVIEWS</div>
+          <div id="home-pending-mods"></div>
+        </div>
+        
+        <div style="background:#242435;border:1px solid rgba(255,255,255,0.06);border-radius:11px;padding:16px">
+          <div style="display:flex;align-items:center;gap:8px;color:#a6e3a1;font-size:11.5px;font-weight:700;margin-bottom:10px"><i class="fa-solid fa-gamepad"></i>MINECRAFT SERVER</div>
+          <div style="font-size:20px;font-weight:700;margin-bottom:4px;color:#e4e4f0"><span id="mc-players-card">0 / 0</span> <span style="font-size:11.5px;font-weight:500;color:#9399b2">players</span></div>
+          <div id="mc-version-card" style="font-size:11.5px;color:#9399b2">Checking status...</div>
+        </div>
+
+        <div style="border:1.5px dashed rgba(255,255,255,0.12);border-radius:11px;padding:16px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;color:#4c4f61;min-height:96px"><i class="fa-solid fa-heart-pulse" style="font-size:16px"></i><span style="font-size:11.5px;font-weight:500">System Status</span></div>
+        <div style="border:1.5px dashed rgba(255,255,255,0.12);border-radius:11px;padding:16px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;color:#4c4f61;min-height:96px"><i class="fa-solid fa-boxes-stacked" style="font-size:16px"></i><span style="font-size:11.5px;font-weight:500">Containers</span></div>
+        <div style="border:1.5px dashed rgba(255,255,255,0.12);border-radius:11px;padding:16px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;color:#4c4f61;min-height:96px"><i class="fa-solid fa-network-wired" style="font-size:16px"></i><span style="font-size:11.5px;font-weight:500">Network</span></div>
+      </div>
+    </div>
+
+    <!-- INTAKE VIEW -->
+    <div id="view-intake" style="display:flex;flex:1;min-height:0">
+      <div style="width:360px;flex:none;display:flex;flex-direction:column;border-right:1px solid rgba(255,255,255,0.06);min-height:0">
+        <div id="intake-folders" style="flex:none;display:flex;flex-direction:column;gap:1px;padding:10px 10px 8px;border-bottom:1px solid rgba(255,255,255,0.06)">
+          <div class="nav-item folder-item active" data-folder="all" style="display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:7px;font-size:12.5px;font-weight:500;cursor:pointer;color:#e4e4f0;background:rgba(165,180,252,0.1)">
+            <i class="fa-solid fa-inbox" style="width:14px;font-size:11.5px"></i>
+            <span>All Articles</span>
+            <span id="folder-count-all" style="margin-left:auto;font-size:10.5px;color:#6c7086;font-weight:600">0</span>
+          </div>
+          <div class="nav-item folder-item" data-folder="homelab" style="display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:7px;font-size:12.5px;font-weight:500;cursor:pointer;color:#9399b2;background:transparent">
+            <i class="fa-solid fa-server" style="width:14px;font-size:11.5px"></i>
+            <span>Homelab</span>
+            <span id="folder-count-homelab" style="margin-left:auto;font-size:10.5px;color:#6c7086;font-weight:600">0</span>
+          </div>
+          <div class="nav-item folder-item" data-folder="news" style="display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:7px;font-size:12.5px;font-weight:500;cursor:pointer;color:#9399b2;background:transparent">
+            <i class="fa-solid fa-newspaper" style="width:14px;font-size:11.5px"></i>
+            <span>News</span>
+            <span id="folder-count-news" style="margin-left:auto;font-size:10.5px;color:#6c7086;font-weight:600">0</span>
+          </div>
+          <div class="nav-item folder-item" data-folder="errors" style="display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:7px;font-size:12.5px;font-weight:500;cursor:pointer;color:#9399b2;background:transparent">
+            <i class="fa-solid fa-triangle-exclamation" style="width:14px;font-size:11.5px"></i>
+            <span>Errors &amp; Rejections</span>
+            <span id="folder-count-errors" style="margin-left:auto;font-size:10.5px;color:#6c7086;font-weight:600">0</span>
+          </div>
+        </div>
+        <div style="flex:1;overflow:auto;padding:10px" class="custom-scroll">
+          <div id="queue-list"></div>
+          <div id="articles-list"></div>
+        </div>
+      </div>
+      <div style="flex:1;overflow:auto;padding:26px 32px;min-width:0" class="custom-scroll">
+        <div id="reader-view" style="height:100%;">
+          <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:#4c4f61">
+            <i class="fa-solid fa-book-open" style="font-size:28px"></i>
+            <span style="font-size:13.5px;font-weight:500">Select an article to read</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODS VIEW -->
+    <div id="view-mods" style="display:none;flex:1;overflow:auto;padding:24px 28px" class="custom-scroll">
+      <div style="font-size:11.5px;font-weight:700;letter-spacing:0.5px;color:#6c7086;margin-bottom:12px">PENDING REVIEWS</div>
+      <div id="staging-list" style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:28px"></div>
+
+      <div style="font-size:11.5px;font-weight:700;letter-spacing:0.5px;color:#6c7086;margin-bottom:12px">PIPELINE HISTORY</div>
+      <div id="mods-list" style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px"></div>
+    </div>
+
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
 </body>
 </html>
