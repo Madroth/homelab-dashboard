@@ -216,7 +216,40 @@ def get_mods():
     try:
         with open(MOD_REGISTRY_FILE, 'r') as f:
             data = json.load(f)
-        return jsonify(data.get('mods', {}))
+        mods = data.get('mods', {})
+
+        # Deployed submission dirs retain metadata.json (version) and
+        # submission.json (submitted_at) even after deploy; registry.json
+        # itself doesn't track version, so enrich by matching on sha256.
+        deployed_by_hash = {}
+        if DEPLOYED.exists():
+            for d in DEPLOYED.iterdir():
+                sub_path = d / "submission.json"
+                meta_path = d / "metadata.json"
+                if not sub_path.exists():
+                    continue
+                try:
+                    sub_data = read_json(sub_path)
+                except Exception:
+                    continue
+                version = None
+                if meta_path.exists():
+                    try:
+                        version = read_json(meta_path).get('version')
+                    except Exception:
+                        pass
+                deployed_by_hash[sub_data.get('sha256')] = {
+                    'version': version,
+                    'submitted_at': sub_data.get('arrived_at'),
+                }
+
+        for mod in mods.values():
+            info = deployed_by_hash.get(mod.get('current_hash'))
+            if info:
+                mod['version'] = info['version']
+                mod['submitted_at'] = info['submitted_at']
+
+        return jsonify(mods)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

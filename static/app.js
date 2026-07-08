@@ -444,13 +444,18 @@ document.addEventListener('DOMContentLoaded', () => {
             const modName = item.meta?.name || item.id;
             const submitter = item.sub?.submitted_by || 'Unknown';
             const hash = item.sub?.sha256 ? item.sub.sha256.substring(0, 16) + '...' : 'Unknown';
+            const version = item.meta?.version;
+            const submittedAt = item.sub?.arrived_at;
 
             card.innerHTML = `
                 <div style="display:flex;align-items:center;gap:9px">
                   <div style="width:30px;height:30px;border-radius:8px;background:rgba(249,201,124,0.14);color:#f9c97c;display:flex;align-items:center;justify-content:center;font-size:13px"><i class="fa-solid fa-cube"></i></div>
                   <div style="flex:1;min-width:0">
-                    <div style="font-size:13.5px;font-weight:600;line-height:1.3;color:#e4e4f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${modName}</div>
-                    <div style="font-size:11px;color:#9399b2">by ${submitter}</div>
+                    <div style="display:flex;align-items:center;gap:6px">
+                      <span style="font-size:13.5px;font-weight:600;line-height:1.3;color:#e4e4f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${modName}</span>
+                      ${version ? `<span style="font-size:9.5px;font-weight:700;color:#9399b2;background:rgba(255,255,255,0.06);border-radius:6px;padding:1px 6px;flex:none">v${version}</span>` : ''}
+                    </div>
+                    <div style="font-size:11px;color:#9399b2">by ${submitter}${submittedAt ? ' · ' + formatDate(submittedAt) : ''}</div>
                   </div>
                 </div>
                 <div style="display:flex;align-items:center;gap:6px;font-size:10.5px;color:#6c7086;font-family:'JetBrains Mono',monospace;background:rgba(255,255,255,0.03);border-radius:6px;padding:6px 8px">
@@ -567,15 +572,19 @@ document.addEventListener('DOMContentLoaded', () => {
             const history = mod.history || [];
             const lastUpdate = history.length > 0 ? history[history.length - 1].submitted_at : '';
             const deployedBy = history.length > 0 && history[history.length - 1].decided_by ? history[history.length - 1].decided_by : 'admin';
-            
+            const version = mod.version;
+
             const card = document.createElement('div');
             card.style.cssText = 'background:#242435;border:1px solid rgba(255,255,255,0.05);border-radius:11px;padding:16px;display:flex;flex-direction:column;gap:8px;opacity:0.85;min-width:0';
             card.innerHTML = `
                 <div style="display:flex;align-items:center;gap:9px">
                   <div style="width:28px;height:28px;border-radius:7px;background:rgba(166,227,161,0.12);color:#a6e3a1;display:flex;align-items:center;justify-content:center;font-size:12px"><i class="fa-solid fa-check"></i></div>
                   <div style="flex:1;min-width:0">
-                    <div style="font-size:13px;font-weight:600;line-height:1.3;color:#e4e4f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${modName}</div>
-                    <div style="font-size:10.5px;color:#9399b2">by ${mod.submitted_by || 'Unknown'}</div>
+                    <div style="display:flex;align-items:center;gap:6px">
+                      <span style="font-size:13px;font-weight:600;line-height:1.3;color:#e4e4f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${modName}</span>
+                      ${version ? `<span style="font-size:9.5px;font-weight:700;color:#9399b2;background:rgba(255,255,255,0.06);border-radius:6px;padding:1px 6px;flex:none">v${version}</span>` : ''}
+                    </div>
+                    <div style="font-size:10.5px;color:#9399b2">by ${mod.submitted_by || 'Unknown'}${mod.submitted_at ? ' · submitted ' + formatDate(mod.submitted_at) : ''}</div>
                   </div>
                 </div>
                 <div style="font-size:11px;color:#6c7086">Approved ${formatDate(lastUpdate)} · deployed by ${deployedBy}</div>
