@@ -9,6 +9,7 @@ from flask import Flask, jsonify, send_from_directory, request
 app = Flask(__name__, static_folder='static')
 ARTICLES_DIR = os.path.expanduser('~/projects/homelab-intake/articles')
 MOD_REGISTRY_FILE = os.path.expanduser('~/work/claude-code/modpipeline/data/registry.json')
+SETTINGS_FILE = os.path.expanduser('~/projects/homelab-dashboard/settings.json')
 
 # ModPipeline integration
 from dotenv import load_dotenv
@@ -21,6 +22,10 @@ from common.sidecar import read_json, write_reason
 import registry as mod_registry
 from deploy import pipeline as deploy_pipeline
 from deploy.pipeline import DeployError
+
+# Global path for media-curator to resolve imports for backend features
+if '/home/linuxbox/projects/media-curator' not in sys.path:
+    sys.path.append('/home/linuxbox/projects/media-curator')
 
 _deploy_lock = threading.Lock()
 
@@ -324,6 +329,235 @@ def reject_mod(sid):
                                    sub["submitted_by"], "rejected", decided_by=decided_by)
     return jsonify({"success": True})
 
+import sqlite3
+import json
+
+MEDIA_DB = os.path.expanduser('~/projects/media-curator/queue.db')
+
+@app.route('/api/media/queue')
+def get_media_queue():
+    if not os.path.exists(MEDIA_DB):
+        return jsonify([])
+    import sys
+    if '/home/linuxbox/projects/media-curator' not in sys.path:
+        sys.path.append('/home/linuxbox/projects/media-curator')
+    from database import get_conn
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    
+    search = request.args.get('search', '')
+    media_type = request.args.get('type', '')
+    status = request.args.get('status', '')
+    
+    query = 'SELECT * FROM media_queue WHERE 1=1'
+    params = []
+    if search:
+        query += ' AND (proposed_title LIKE ? OR original_filename LIKE ?)'
+        params.extend([f'%{search}%', f'%{search}%'])
+    if media_type:
+        query += ' AND media_type = ?'
+        params.append(media_type)
+    if status:
+        query += ' AND status = ?'
+        params.append(status)
+        
+    query += ' ORDER BY created_at DESC LIMIT 100'
+    c.execute(query, params)
+    
+    rows = []
+    for r in c.fetchall():
+        d = dict(r)
+        d['metadata'] = json.loads(d['metadata_json']) if d['metadata_json'] else {}
+        rows.append(d)
+    conn.close()
+    return jsonify(rows)
+
+@app.route('/api/media/approve/<item_id>', methods=['POST'])
+def approve_media(item_id):
+    import sys
+    if '/home/linuxbox/projects/media-curator' not in sys.path:
+        sys.path.append('/home/linuxbox/projects/media-curator')
+    try:
+        from library import approve_item
+        success, msg = approve_item(item_id)
+        if success:
+            return jsonify({'success': True})
+        else:
+            return jsonify({'error': msg}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/media/reclassify/<item_id>', methods=['POST'])
+def reclassify_media(item_id):
+    data = request.json
+    new_type = data.get('media_type')
+    
+    import sys
+    if '/home/linuxbox/projects/media-curator' not in sys.path:
+        sys.path.append('/home/linuxbox/projects/media-curator')
+    from database import get_conn
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute('SELECT * FROM media_queue WHERE id=?', (item_id,))
+    row = c.fetchone()
+    
+    if not row:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+        
+    original_path = row['original_path']
+    old_proposed = row['proposed_path']
+    
+    # If the file has already been moved to the library, use the library file as the source
+    if row['status'] == 'approved' and old_proposed and os.path.exists(old_proposed):
+        original_path = old_proposed
+        c.execute('UPDATE media_queue SET original_path=? WHERE id=?', (original_path, item_id))
+        # Do not unlink it! We will just move it.
+    import sys
+    if '/home/linuxbox/projects/media-curator' not in sys.path:
+        sys.path.append('/home/linuxbox/projects/media-curator')
+    try:
+        from curator_daemon import identify_media
+    except ImportError:
+        conn.close()
+        return jsonify({'error': 'Backend daemon not found.'}), 500
+        
+    is_group = False
+    if os.path.isdir(original_path):
+        is_group = True
+        filename = os.path.basename(original_path)
+        ext = ""
+    else:
+        filename = os.path.basename(original_path)
+        ext = os.path.splitext(filename)[1].lower()
+
+    res = identify_media(filename, original_path, ext, is_group=is_group, force_media_type=new_type)
+    if not res:
+        conn.close()
+        return jsonify({'error': 'Failed to reclassify via backend daemon.'}), 500
+        
+    media_type, proposed_title, proposed_path, metadata, _ = res
+    
+    metadata['sort_logic'] = f"User manually reclassified as {new_type}."
+    meta_str = json.dumps(metadata)
+    
+    c.execute('''UPDATE media_queue SET media_type=?, proposed_title=?, proposed_path=?, metadata_json=?, status="pending" WHERE id=?''',
+              (new_type, proposed_title, proposed_path, meta_str, item_id))
+    conn.commit()
+    conn.close()
+    
+    # Re-approve automatically
+    try:
+        import sys
+        if '/home/linuxbox/projects/media-curator' not in sys.path:
+            sys.path.append('/home/linuxbox/projects/media-curator')
+        from library import approve_item
+        success, msg = approve_item(item_id)
+        if not success:
+            return jsonify({'error': msg}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+        
+    return jsonify({'success': True})
+
+@app.route('/api/media/reject/<item_id>', methods=['POST'])
+def reject_media(item_id):
+    import sys
+    if '/home/linuxbox/projects/media-curator' not in sys.path:
+        sys.path.append('/home/linuxbox/projects/media-curator')
+    try:
+        from library import reject_item
+        success, msg = reject_item(item_id)
+        if success:
+            return jsonify({'success': True})
+        else:
+            return jsonify({'error': msg}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@app.route('/api/media/edit/<item_id>', methods=['POST'])
+def edit_media(item_id):
+    data = request.json or {}
+    import sqlite3
+    from database import get_conn
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    
+    if 'proposed_title' in data:
+        new_title = data['proposed_title']
+        c.execute('SELECT * FROM media_queue WHERE id=?', (item_id,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({'error': 'Item not found'}), 404
+            
+        if row['status'] == 'approved':
+            conn.close()
+            return jsonify({'error': 'Cannot edit title of an approved item. Use Reclassify instead.'}), 400
+            
+        c.execute('UPDATE media_queue SET proposed_title=? WHERE id=?', (new_title, item_id))
+        
+    c.execute('UPDATE media_queue SET needs_intervention=0 WHERE id=?', (item_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/system/status')
+def get_system_status():
+    import subprocess
+    import json
+    import shutil
+    
+    status = {'defcon': [], 'containers': [], 'disk': {}, 'memory': {}}
+    
+    # 1. Check Disk Space on /mnt/Multimedia
+    try:
+        total, used, free = shutil.disk_usage('/mnt/Multimedia')
+        free_pct = (free / total) * 100
+        status['disk'] = {'total': total, 'used': used, 'free': free, 'free_pct': free_pct}
+        if free_pct < 5.0:
+            status['defcon'].append('STORAGE_CRITICAL: /mnt/Multimedia is below 5% free space!')
+    except Exception:
+        status['disk'] = {'error': 'Could not read /mnt/Multimedia'}
+
+    # 2. Check Docker Containers & Plex Memory Limit
+    try:
+        docker_ps = subprocess.check_output(['docker', 'ps', '-a', '--format', '{{json .}}'], text=True)
+        containers = [json.loads(line) for line in docker_ps.strip().split('\n') if line]
+        status['containers'] = containers
+        
+        # Check VPN Killswitch Status
+        gluetun = next((c for c in containers if 'gluetun' in c['Names']), None)
+        if gluetun and ('unhealthy' in gluetun.get('Status', '').lower() or 'exited' in gluetun.get('Status', '').lower()):
+            status['defcon'].append('VPN_DOWN: Gluetun tunnel has collapsed or failed authentication!')
+            
+        # Get memory stats for Plex (rough approximation using docker stats)
+        # docker stats --no-stream --format "{{json .}}" plex
+        try:
+            plex_stats = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{json .}}', 'plex'], text=True)
+            if plex_stats.strip():
+                plex_data = json.loads(plex_stats.strip())
+                status['memory']['plex'] = plex_data.get('MemUsage', 'Unknown')
+        except:
+            pass
+            
+    except Exception as e:
+        status['containers'] = []
+
+    # 3. Check Daemon Status
+    try:
+        daemon_status = subprocess.run(['systemctl', '--user', 'is-active', 'media-curator'], capture_output=True, text=True).stdout.strip()
+        status['daemon_active'] = (daemon_status == 'active')
+        if daemon_status != 'active':
+            status['defcon'].append('DAEMON_CRASH: media-curator.service is not active!')
+    except:
+        status['daemon_active'] = False
+
+    return jsonify(status)
+
 @app.route("/setup")
 def setup():
     DOWNLOADS_DIR = os.path.join(os.environ['MODPIPELINE_DATA_ROOT'], "downloads")
@@ -357,5 +591,396 @@ def get_minecraft_status():
             'error': str(e)
         })
 
+@app.route("/api/settings", methods=['GET'])
+def get_settings():
+    import json
+    if not os.path.exists(SETTINGS_FILE):
+        return jsonify({})
+    try:
+        with open(SETTINGS_FILE, 'r') as f:
+            data = json.load(f)
+            # Mask API keys
+            for k in ['geminiApiKey', 'anthropicApiKey', 'openaiApiKey']:
+                if k in data and data[k]:
+                    data[k] = data[k][:8] + '*' * 20
+            return jsonify(data)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route("/api/settings", methods=['POST'])
+def save_settings():
+    import json
+    data = request.json or {}
+    current = {}
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, 'r') as f:
+                current = json.load(f)
+        except: pass
+        
+    for k, v in data.items():
+        if '*' not in str(v):  # Don't save masked keys back
+            current[k] = v
+            
+    try:
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump(current, f, indent=2)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/ai/chat', methods=['POST'])
+def ai_chat():
+    data = request.json or {}
+    user_message = data.get('message', '')
+    history_data = data.get('history', [])
+    model = data.get('model', 'agy')
+
+    if not user_message:
+        return jsonify({'error': 'No message provided'}), 400
+
+    # Load settings from file
+    import json
+    settings = {}
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, 'r') as f:
+                settings = json.load(f)
+        except: pass
+
+    if model == 'local':
+        # Example logic for local/Ollama using settings
+        ollama_host = settings.get('ollamaHost', 'http://127.0.0.1:11434')
+        return jsonify({'reply': f'The local model via {ollama_host} is currently offline or not fully configured.'})
+
+    elif model == 'claude':
+        # Anthropic integration
+        import anthropic
+        api_key = settings.get('anthropicApiKey') or os.environ.get('ANTHROPIC_API_KEY')
+        if not api_key:
+            return jsonify({'reply': 'Anthropic API key is not configured in Settings.'})
+        
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+            history_text = "\n".join([f"{m.get('role', 'user').title()}: {m.get('text', '')}" for m in history_data])
+            prompt = f"{history_text}\n\nUser: {user_message}" if history_text else user_message
+            
+            message = client.messages.create(
+                max_tokens=1024,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                model="claude-sonnet-5",
+            )
+            return jsonify({'reply': message.content[0].text})
+        except Exception as e:
+            return jsonify({'reply': f'Error communicating with Claude: {str(e)}'}), 500
+
+    elif model == 'agy':
+        try:
+            from google import genai
+            from google.genai import types
+            import os
+            
+            api_key = settings.get('geminiApiKey') or os.environ.get('GEMINI_API_KEY')
+            if not api_key:
+                return jsonify({'reply': 'GEMINI_API_KEY is not configured in Settings.'})
+
+            # Define tools
+            def get_minecraft_status_tool() -> str:
+                """Returns the current online status and player count of the Minecraft server."""
+                try:
+                    from mcstatus import JavaServer
+                    server = JavaServer.lookup("100.87.245.107:25565", timeout=2)
+                    status = server.status()
+                    return f"Minecraft server is Online. Players: {status.players.online}/{status.players.max}. Version: {status.version.name}"
+                except Exception as e:
+                    return f"Minecraft server is Offline or unreachable. Error: {str(e)}"
+
+            def get_pending_mods_tool() -> str:
+                """Returns a list of mods currently in the staging directory pending review."""
+                try:
+                    staging = []
+                    if STAGING.exists():
+                        for d in sorted(STAGING.iterdir()):
+                            meta_path = d / "metadata.json"
+                            sub_path = d / "submission.json"
+                            if meta_path.exists() and sub_path.exists():
+                                meta = read_json(meta_path)
+                                staging.append(f"ID: {d.name}, Mod: {meta.get('name', 'Unknown')}")
+                    if not staging:
+                        return "No pending mods in staging."
+                    return "\n".join(staging)
+                except Exception as e:
+                    return f"Error reading staging directory: {str(e)}"
+
+            def approve_mod_tool(mod_id: str) -> str:
+                """Approves a pending mod by its exact ID (e.g., '1234abcd') and deploys it."""
+                # We can call the internal approve_mod logic, but we need to mock a request or just refactor.
+                # Since the logic is coupled to Flask's request/jsonify, we can use test_client or refactor.
+                # Simpler: just do the logic here for the tool.
+                d = STAGING / mod_id
+                if not d.exists():
+                    return f"Error: Mod ID {mod_id} not found in staging."
+                try:
+                    meta = read_json(d / "metadata.json")
+                    sub = read_json(d / "submission.json")
+                    
+                    if not _deploy_lock.acquire(blocking=False):
+                        return "Error: A deployment is already in progress. Please try again later."
+                        
+                    try:
+                        APPROVED.mkdir(parents=True, exist_ok=True)
+                        dest = APPROVED / d.name
+                        shutil.move(str(d), str(dest))
+                        mod_registry.record_submission(meta["mod_id"], sub["sha256"], sub["original_filename"],
+                                                       sub["submitted_by"], "approved_pending_deploy", decided_by="ai_assistant")
+                        deploy_pipeline.run(dest, meta, sub, decided_by="ai_assistant")
+                        DEPLOYED.mkdir(parents=True, exist_ok=True)
+                        final = DEPLOYED / dest.name
+                        shutil.move(str(dest), str(final))
+                        mod_registry.record_deployed(meta["mod_id"], sub["sha256"], sub["original_filename"],
+                                                     sub["submitted_by"], "ai_assistant")
+                        return f"Success! Mod '{meta.get('name', mod_id)}' has been approved and deployed."
+                    finally:
+                        _deploy_lock.release()
+                except Exception as e:
+                    return f"Failed to approve mod: {str(e)}"
+
+            def get_media_queue_tool() -> str:
+                """Returns a list of media items currently in the queue pending approval."""
+                try:
+                    import sys
+                    if '/home/linuxbox/projects/media-curator' not in sys.path:
+                        sys.path.append('/home/linuxbox/projects/media-curator')
+                    from database import get_conn
+                    conn = get_conn()
+                    conn.row_factory = sqlite3.Row
+                    c = conn.cursor()
+                    c.execute('SELECT id, original_filename, proposed_title, proposed_path, status FROM media_queue WHERE status="pending"')
+                    items = c.fetchall()
+                    conn.close()
+                    if not items:
+                        return "No pending media in queue."
+                    res = []
+                    for row in items:
+                        res.append(f"ID: {row['id']} | File: {row['original_filename']} | Title: {row['proposed_title']} | Path: {row['proposed_path']}")
+                    return "\n".join(res)
+                except Exception as e:
+                    return f"Error reading media queue: {str(e)}"
+                    
+            def approve_media_tool(item_id: str) -> str:
+                """Approves a media item in the queue by its exact ID (e.g. '1234abcd')."""
+                try:
+                    import sys
+                    if '/home/linuxbox/projects/media-curator' not in sys.path:
+                        sys.path.append('/home/linuxbox/projects/media-curator')
+                    from library import approve_item
+                    success, msg = approve_item(item_id)
+                    if success:
+                        return f"Success! Media item '{item_id}' approved and moved to library."
+                    else:
+                        return f"Failed to approve media: {msg}"
+                except Exception as e:
+                    return f"Error: {str(e)}"
+                    
+            def reject_media_tool(item_id: str) -> str:
+                """Rejects a media item in the queue by its exact ID."""
+                try:
+                    import sys
+                    if '/home/linuxbox/projects/media-curator' not in sys.path:
+                        sys.path.append('/home/linuxbox/projects/media-curator')
+                    from library import reject_item
+                    success, msg = reject_item(item_id)
+                    if success:
+                        return f"Success! Media item '{item_id}' rejected."
+                    else:
+                        return f"Failed to reject media: {msg}"
+                except Exception as e:
+                    return f"Error: {str(e)}"
+                    
+            def edit_media_tool(item_id: str, proposed_title: str = None) -> str:
+                """Edits a media item's proposed title in the queue."""
+                try:
+                    import requests
+                    payload = {}
+                    if proposed_title: payload['proposed_title'] = proposed_title
+                    resp = requests.post(f"http://127.0.0.1:8085/api/media/edit/{item_id}", json=payload)
+                    if resp.status_code == 200:
+                        return f"Success! Media item '{item_id}' updated."
+                    else:
+                        return f"Failed to edit media: {resp.text}"
+                except Exception as e:
+                    return f"Error: {str(e)}"
+
+            dashboard_state = "You are an AI assistant built directly into the OmegaLab Dashboard sidebar. Be helpful, concise, and friendly. You have tools to manage the dashboard and server. When a user asks you to execute a change, first use a GET tool (like get_media_queue_tool) to find the ID of the item, then use the appropriate action tool (like edit_media_tool) with that ID."
+            
+            client = genai.Client(api_key=api_key)
+            
+            # Reconstruct history
+            messages = []
+            for msg in history_data:
+                role = 'user' if msg.get('role') == 'user' else 'model'
+                messages.append(types.Content(role=role, parts=[types.Part.from_text(text=msg.get('text', ''))]))
+                
+            messages.append(types.Content(role='user', parts=[types.Part.from_text(text=user_message)]))
+            
+            config = types.GenerateContentConfig(
+                system_instruction=dashboard_state,
+                tools=[get_minecraft_status_tool, get_pending_mods_tool, approve_mod_tool, get_media_queue_tool, approve_media_tool, reject_media_tool, edit_media_tool],
+                temperature=0.5
+            )
+            
+            # Let's handle tool calls manually because we need to return the final text to the frontend in one go
+            # Wait, genai has automatic function calling if we use client.chats!
+            chat = client.chats.create(model='gemini-2.5-flash', config=config)
+            
+            # Prime the chat history (excluding the very last user message)
+            for msg in messages[:-1]:
+                # Workaround: google-genai chat doesn't let us easily inject history yet via create().
+                # We can just send the whole history as one text block if we want, or use generate_content
+                pass
+                
+            # Actually, generate_content doesn't auto-call tools unless we use chat.
+            # So we will just use chat.send_message, and format the history as context in the first message.
+            history_text = "\n".join([f"{m.get('role', 'user').upper()}: {m.get('text', '')}" for m in history_data])
+            if history_text:
+                full_prompt = f"Previous conversation context:\n{history_text}\n\nUSER: {user_message}"
+            else:
+                full_prompt = user_message
+                
+            response = chat.send_message(full_prompt)
+            return jsonify({'reply': response.text})
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return jsonify({'reply': f'Error communicating with Gemini: {str(e)}'}), 500
+
+    return jsonify({'reply': f'Model {model} is not supported yet.'})
+
+
+
+@app.route('/api/system/logs')
+def system_logs():
+    import os
+    log_file = '/home/linuxbox/projects/media-curator/daemon.log'
+    if not os.path.exists(log_file):
+        return jsonify({'logs': []})
+    try:
+        with open(log_file, 'r') as f:
+            lines = f.readlines()
+            return jsonify({'logs': lines[-100:]}) # last 100 lines
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/media/upload', methods=['POST'])
+def upload_media():
+    import os
+    from werkzeug.utils import secure_filename
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    from curator_daemon import DROP_ZONE, is_contained
+    os.makedirs(DROP_ZONE, exist_ok=True)
+    filename = secure_filename(file.filename)
+    if not filename:
+        return jsonify({'error': 'Invalid filename'}), 400
+    file_path = os.path.join(DROP_ZONE, filename)
+    if not is_contained(file_path, DROP_ZONE):
+        return jsonify({'error': 'Path traversal blocked'}), 400
+    file.save(file_path)
+    return jsonify({'success': True, 'filename': filename})
+
+@app.route('/api/media/bulk_action', methods=['POST'])
+def bulk_action():
+    data = request.json or {}
+    action = data.get('action')
+    item_ids = data.get('item_ids', [])
+    
+    if not action or not item_ids:
+        return jsonify({'error': 'Missing action or item_ids'}), 400
+        
+    results = []
+    if action == 'approve':
+        from library import approve_item
+        for iid in item_ids:
+            success, msg = approve_item(iid)
+            results.append({'id': iid, 'success': success, 'msg': msg})
+    elif action == 'reject':
+        from library import reject_item
+        for iid in item_ids:
+            success, msg = reject_item(iid)
+            results.append({'id': iid, 'success': success, 'msg': msg})
+    else:
+        return jsonify({'error': 'Invalid action'}), 400
+        
+    return jsonify({'results': results})
+
+@app.route('/api/media/undo/<item_id>', methods=['POST'])
+def undo_media(item_id):
+    import os
+    import shutil
+    import sqlite3
+    from database import get_conn
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute('SELECT * FROM media_queue WHERE id=?', (item_id,))
+    row = c.fetchone()
+    if not row or row['status'] != 'approved':
+        conn.close()
+        return jsonify({'error': 'Item not found or not approved'}), 400
+        
+    proposed_path = row['proposed_path']
+    original_filename = row['original_filename']
+    from curator_daemon import DROP_ZONE
+    dest_path = os.path.join(DROP_ZONE, original_filename)
+    
+    if os.path.exists(proposed_path):
+        if os.path.exists(dest_path):
+            conn.close()
+            return jsonify({'error': f'Destination {original_filename} already exists in drop zone.'}), 400
+        try:
+            shutil.move(proposed_path, dest_path)
+        except Exception as e:
+            conn.close()
+            return jsonify({'error': f'Move failed: {str(e)}'}), 500
+            
+    c.execute('UPDATE media_queue SET status="pending", needs_intervention=1, original_path=? WHERE id=?', (dest_path, item_id))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/media/cover/<item_id>')
+def media_cover(item_id):
+    import os
+    import sqlite3
+    from flask import send_file
+    from database import get_conn
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute('SELECT * FROM media_queue WHERE id=?', (item_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        return "Not found", 404
+        
+    search_path = row['proposed_path'] if row['status'] == 'approved' else row['original_path']
+    if not search_path or not os.path.exists(search_path):
+        return "No file", 404
+        
+    src_dir = os.path.dirname(search_path)
+    cover_names = ['cover.jpg', 'cover.png', 'folder.jpg', 'poster.jpg']
+    for name in cover_names:
+        p = os.path.join(src_dir, name)
+        if os.path.exists(p):
+            return send_file(p)
+            
+    return "No cover found", 404
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8085, debug=True)
+    app.run(host='0.0.0.0', port=8085, debug=False)

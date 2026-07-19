@@ -8,13 +8,158 @@ document.addEventListener('DOMContentLoaded', () => {
     const navHome = document.getElementById('nav-home');
     const navIntake = document.getElementById('nav-intake');
     const navMods = document.getElementById('nav-mods');
+    const navMedia = document.getElementById('nav-media');
+    const navSettings = document.getElementById('nav-settings');
+    const navSystem = document.getElementById('nav-system');
+    
     const viewHome = document.getElementById('view-home');
     const viewIntake = document.getElementById('view-intake');
     const viewMods = document.getElementById('view-mods');
+    const viewMedia = document.getElementById('view-media');
+    const viewSettings = document.getElementById('view-settings');
+    const viewSystem = document.getElementById('view-system');
     
+    const navItems = [navHome, navIntake, navMods, navMedia, navSettings, navSystem];
+    const views = [viewHome, viewIntake, viewMods, viewMedia, viewSettings, viewSystem];
+
+    function switchView(viewId) {
+        views.forEach(v => {
+            if (v) v.style.display = 'none';
+        });
+        navItems.forEach(n => {
+            if (n) {
+                n.classList.remove('active');
+                n.style.background = 'transparent';
+                n.style.color = '#9399b2';
+            }
+        });
+
+        const v = document.getElementById(`view-${viewId}`);
+        const n = document.getElementById(`nav-${viewId}`);
+        if (v) v.style.display = viewId === 'intake' ? 'flex' : 'block';
+        if (n) {
+            n.classList.add('active');
+            n.style.background = 'rgba(165,180,252,0.1)';
+            n.style.color = '#e4e4f0';
+        }
+        
+        if (viewId === 'intake') applyArticleFilter();
+        if (viewId === 'mods') fetchMods();
+        if (viewId === 'media') fetchMediaQueue();
+    }
+
+    if (navHome) navHome.addEventListener('click', () => switchView('home'));
+    if (navIntake) navIntake.addEventListener('click', () => switchView('intake'));
+    if (navMods) navMods.addEventListener('click', () => { switchView('mods'); fetchMods(); });
+    if (navMedia) navMedia.addEventListener('click', () => { switchView('media'); fetchMediaQueue(); });
+    if (navSettings) navSettings.addEventListener('click', () => switchView('settings'));
+    if (navSystem) navSystem.addEventListener('click', () => { switchView('system'); loadSystemStatus(); });
+
     const modsListEl = document.getElementById('mods-list');
     const stagingListEl = document.getElementById('staging-list');
     const navModsBadge = document.getElementById('nav-mods-badge');
+
+    // AI Sidebar
+    const aiToggleBtn = document.getElementById('ai-toggle-btn');
+    const aiSidebar = document.getElementById('ai-sidebar');
+    const aiCloseBtn = document.getElementById('ai-close-btn');
+    const aiSendBtn = document.getElementById('ai-send-btn');
+    const aiChatInput = document.getElementById('ai-chat-input');
+    const aiChatHistory = document.getElementById('ai-chat-history');
+    
+    let chatHistory = [];
+
+    function toggleAISidebar() {
+        if (aiSidebar.style.marginRight === '-320px') {
+            aiSidebar.style.marginRight = '0';
+        } else {
+            aiSidebar.style.marginRight = '-320px';
+        }
+    }
+
+    if (aiToggleBtn) aiToggleBtn.addEventListener('click', toggleAISidebar);
+    if (aiCloseBtn) aiCloseBtn.addEventListener('click', toggleAISidebar);
+
+    function sendAIMessage() {
+        const text = aiChatInput.value.trim();
+        if (!text) return;
+        
+        const userMsg = document.createElement('div');
+        userMsg.style.cssText = 'display:flex;gap:10px;flex-direction:row-reverse';
+        userMsg.innerHTML = `
+            <div style="width:24px;height:24px;border-radius:6px;background:rgba(255,255,255,0.1);color:#e4e4f0;display:flex;align-items:center;justify-content:center;flex:none;font-weight:700;font-size:11px">U</div>
+            <div style="background:#a5b4fc;padding:10px 12px;border-radius:8px 0 8px 8px;color:#1e1e2e;line-height:1.5">${text.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
+        `;
+        aiChatHistory.appendChild(userMsg);
+        aiChatInput.value = '';
+        aiChatHistory.scrollTop = aiChatHistory.scrollHeight;
+        
+        const loadingMsg = document.createElement('div');
+        loadingMsg.id = 'ai-loading-msg';
+        loadingMsg.style.cssText = 'display:flex;gap:10px';
+        loadingMsg.innerHTML = `
+            <div style="width:24px;height:24px;border-radius:6px;background:rgba(165,180,252,0.15);color:#a5b4fc;display:flex;align-items:center;justify-content:center;flex:none"><i class="fa-solid fa-robot" style="font-size:11px"></i></div>
+            <div style="background:#242435;padding:10px 12px;border-radius:0 8px 8px 8px;color:#9399b2;line-height:1.5;display:flex;align-items:center;gap:4px">
+              <i class="fa-solid fa-circle fa-beat" style="font-size:4px"></i>
+              <i class="fa-solid fa-circle fa-beat" style="font-size:4px;animation-delay:0.1s"></i>
+              <i class="fa-solid fa-circle fa-beat" style="font-size:4px;animation-delay:0.2s"></i>
+            </div>
+        `;
+        aiChatHistory.appendChild(loadingMsg);
+        aiChatHistory.scrollTop = aiChatHistory.scrollHeight;
+        
+        chatHistory.push({ role: 'user', text: text });
+        
+        fetch('/api/ai/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                message: text, 
+                history: chatHistory.slice(0, -1),
+                model: document.getElementById('ai-model-select').value 
+            })
+        }).then(res => res.json()).then(data => {
+            const loadingNode = document.getElementById('ai-loading-msg');
+            if (loadingNode) loadingNode.remove();
+            
+            chatHistory.push({ role: 'model', text: data.reply || 'No response' });
+            
+            const botMsg = document.createElement('div');
+            botMsg.style.cssText = 'display:flex;gap:10px';
+            botMsg.innerHTML = `
+                <div style="width:24px;height:24px;border-radius:6px;background:rgba(165,180,252,0.15);color:#a5b4fc;display:flex;align-items:center;justify-content:center;flex:none"><i class="fa-solid fa-robot" style="font-size:11px"></i></div>
+                <div style="background:#242435;padding:10px 12px;border-radius:0 8px 8px 8px;color:#e4e4f0;line-height:1.5;overflow-x:hidden" class="markdown-body"></div>
+            `;
+            const mdContainer = botMsg.querySelector('.markdown-body');
+            mdContainer.innerHTML = marked.parse(data.reply || 'No response');
+            mdContainer.style.fontSize = '12.5px';
+            
+            aiChatHistory.appendChild(botMsg);
+            aiChatHistory.scrollTop = aiChatHistory.scrollHeight;
+        }).catch(err => {
+            const loadingNode = document.getElementById('ai-loading-msg');
+            if (loadingNode) loadingNode.remove();
+            
+            const errorMsg = document.createElement('div');
+            errorMsg.style.cssText = 'display:flex;gap:10px';
+            errorMsg.innerHTML = `
+                <div style="width:24px;height:24px;border-radius:6px;background:rgba(243,139,168,0.15);color:#f38ba8;display:flex;align-items:center;justify-content:center;flex:none"><i class="fa-solid fa-triangle-exclamation" style="font-size:11px"></i></div>
+                <div style="background:#242435;padding:10px 12px;border-radius:0 8px 8px 8px;color:#f38ba8;line-height:1.5">Sorry, I encountered an error communicating with the backend.</div>
+            `;
+            aiChatHistory.appendChild(errorMsg);
+            aiChatHistory.scrollTop = aiChatHistory.scrollHeight;
+        });
+    }
+
+    if (aiSendBtn) aiSendBtn.addEventListener('click', sendAIMessage);
+    if (aiChatInput) {
+        aiChatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendAIMessage();
+            }
+        });
+    }
 
     let allArticles = [];
     let allMods = {};
@@ -24,39 +169,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     marked.setOptions({ gfm: true, breaks: true, headerIds: true });
 
-    function switchView(viewName) {
-        navHome.classList.remove('active');
-        navHome.style.color = '#9399b2'; navHome.style.background = 'transparent';
-        navIntake.classList.remove('active');
-        navIntake.style.color = '#9399b2'; navIntake.style.background = 'transparent';
-        navMods.classList.remove('active');
-        navMods.style.color = '#9399b2'; navMods.style.background = 'transparent';
-        
-        viewHome.style.display = 'none';
-        viewIntake.style.display = 'none';
-        viewMods.style.display = 'none';
-
-        if (viewName === 'home') {
-            navHome.classList.add('active');
-            navHome.style.color = '#e4e4f0'; navHome.style.background = 'rgba(165,180,252,0.1)';
-            viewHome.style.display = 'block';
-        } else if (viewName === 'intake') {
-            navIntake.classList.add('active');
-            navIntake.style.color = '#e4e4f0'; navIntake.style.background = 'rgba(165,180,252,0.1)';
-            viewIntake.style.display = 'flex';
-            applyArticleFilter();
-        } else if (viewName === 'mods') {
-            navMods.classList.add('active');
-            navMods.style.color = '#e4e4f0'; navMods.style.background = 'rgba(165,180,252,0.1)';
-            viewMods.style.display = 'block';
-            fetchMods();
-        }
-    }
-
-    navHome.addEventListener('click', () => switchView('home'));
-    navIntake.addEventListener('click', () => switchView('intake'));
-    navMods.addEventListener('click', () => switchView('mods'));
-    
     document.getElementById('home-module-articles').addEventListener('click', () => switchView('intake'));
     document.getElementById('home-module-mods').addEventListener('click', () => switchView('mods'));
 
@@ -215,7 +327,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function applyArticleFilter() {
-        if (viewIntake.style.display === 'none') return;
+        if (viewIntake.style.display === 'none') {
+            updateFolderCounts(); // Ensure badges update even if we aren't viewing it
+            return;
+        }
         const term = searchInput.value.toLowerCase();
         let filtered = allArticles.filter(article =>
             article.title.toLowerCase().includes(term) ||
@@ -628,12 +743,342 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch(e) { }
     }
 
+    // Settings
+    function loadSettings() {
+        fetch('/api/settings').then(res => res.json()).then(data => {
+            if (data.geminiApiKey) document.getElementById('setting-gemini-key').value = data.geminiApiKey;
+            if (data.anthropicApiKey) document.getElementById('setting-anthropic-key').value = data.anthropicApiKey;
+            if (data.ollamaHost) document.getElementById('setting-ollama-host').value = data.ollamaHost;
+        });
+    }
+    
+    document.getElementById('settings-save-btn')?.addEventListener('click', () => {
+        const data = {
+            geminiApiKey: document.getElementById('setting-gemini-key').value,
+            anthropicApiKey: document.getElementById('setting-anthropic-key').value,
+            ollamaHost: document.getElementById('setting-ollama-host').value
+        };
+        fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        }).then(res => res.json()).then(res => {
+            if (res.success) {
+                const btn = document.getElementById('settings-save-btn');
+                const origText = btn.innerText;
+                btn.innerText = 'Saved!';
+                setTimeout(() => { btn.innerText = origText; }, 2000);
+            }
+        });
+    });
+
+    const mediaQueueListEl = document.getElementById('media-queue-list');
+    const navMediaBadge = document.getElementById('nav-media-badge');
+
+    async function fetchMediaQueue() {
+        try {
+            const res = await fetch('/api/media/queue');
+            if (res.ok) {
+                const queue = await res.json();
+                renderMediaQueue(queue);
+            }
+        } catch(e) { console.error('Media fetch error', e); }
+    }
+
+    function renderMediaQueue(queue) {
+        if (!mediaQueueListEl) return;
+        mediaQueueListEl.innerHTML = '';
+        
+        if (queue.length > 0) {
+            const pendingCount = queue.filter(q => q.status === 'pending').length;
+            if(navMediaBadge) {
+                if (pendingCount > 0) {
+                    navMediaBadge.innerText = pendingCount;
+                    navMediaBadge.style.display = 'inline-block';
+                } else {
+                    navMediaBadge.style.display = 'none';
+                }
+            }
+        } else {
+            if(navMediaBadge) navMediaBadge.style.display = 'none';
+            mediaQueueListEl.innerHTML = '<div style="color:#6c7086;font-size:12.5px;padding:20px;text-align:center;border:1.5px dashed rgba(255,255,255,0.12);border-radius:11px">Queue is empty. Waiting for media...</div>';
+            return;
+        }
+
+        queue.forEach(item => {
+            const card = document.createElement('div');
+            
+            if (item.status === 'approved') {
+                card.className = 'btn-icon-hover';
+                card.style.cssText = 'background:rgba(166,227,161,0.05);border:1px solid rgba(166,227,161,0.2);border-radius:9px;padding:12px;display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:8px;transition:background 0.2s';
+                
+                card.innerHTML = `
+                    <div style="width:28px;height:28px;border-radius:7px;background:rgba(166,227,161,0.15);color:#a6e3a1;display:flex;align-items:center;justify-content:center;font-size:12px"><i class="fa-solid fa-check-double"></i></div>
+                    <div style="flex:1;min-width:0">
+                        <div style="font-size:12.5px;font-weight:600;color:#e4e4f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Auto-sorted: ${item.proposed_title}</div>
+                        <div style="font-size:10.5px;color:#9399b2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><i class="fa-solid fa-folder-tree" style="margin-right:4px"></i>${item.proposed_path}</div>
+                    </div>
+                    <div style="font-size:10.5px;color:#6c7086">${formatDate(item.created_at)}</div>
+                `;
+                
+                card.addEventListener('click', () => {
+                    const escapeHTML = (str) => String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+                    const logic = escapeHTML(item.metadata?.sort_logic || 'No logic recorded.');
+                    const shortDesc = escapeHTML(item.metadata?.short_description || 'No short description available.');
+                    const longDesc = escapeHTML(item.metadata?.long_description || 'No long description available.');
+                    const franchise = escapeHTML(item.metadata?.franchise || 'None');
+                    const origFileEsc = escapeHTML(item.original_filename);
+                    const propPathEsc = escapeHTML(item.proposed_path);
+                    const titleEsc = escapeHTML(item.proposed_title);
+                    
+                    const overlay = document.createElement('div');
+                    overlay.className = 'modal-overlay';
+                    overlay.innerHTML = `
+                        <div class="modal-panel" style="width: 550px;">
+                            <div class="modal-title">Media Details</div>
+                            <div class="modal-subtitle">${titleEsc}</div>
+                            
+                            <div style="margin: 14px 0; display:flex; flex-direction:column; gap:12px; font-size:12.5px; color:#c2c6d6; line-height:1.5; max-height:60vh; overflow-y:auto;" class="custom-scroll">
+                                <div>
+                                    <strong style="color:#a5b4fc">Category:</strong>
+                                    <select id="reclassify-dropdown" style="margin-left:8px; background:#191925; border:1px solid rgba(255,255,255,0.1); color:#e4e4f0; border-radius:4px; padding:2px 6px;">
+                                        <option value="movie" ${item.media_type === 'movie' ? 'selected' : ''}>Movie</option>
+                                        <option value="tv_show" ${item.media_type === 'tv_show' ? 'selected' : ''}>TV Show</option>
+                                        <option value="ebook" ${item.media_type === 'ebook' ? 'selected' : ''}>Ebook</option>
+                                        <option value="audiobook" ${item.media_type === 'audiobook' ? 'selected' : ''}>Audiobook</option>
+                                        <option value="comic" ${item.media_type === 'comic' ? 'selected' : ''}>Comic</option>
+                                    </select>
+                                </div>
+                                
+                                <div style="background:#191925; border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:12px;">
+                                    <strong style="color:#a5b4fc">Original File:</strong><br>${origFileEsc}
+                                    <div style="margin-top:6px; color:#f38ba8; display:${item.original_filename === item.proposed_path ? 'none' : 'block'}">
+                                        <strong style="color:#f38ba8">Target Path:</strong><br>${propPathEsc}
+                                    </div>
+                                </div>
+                                <div style="background:#191925; border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:12px;">
+                                    <strong style="color:#a5b4fc">Series/Grouping:</strong><br>${franchise}
+                                </div>
+                                <div style="background:#191925; border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:12px;">
+                                    <strong style="color:#a5b4fc">Short Description:</strong><br>${shortDesc}
+                                </div>
+                                <div style="background:#191925; border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:12px;">
+                                    <strong style="color:#a5b4fc">Long Description:</strong><br>${longDesc}
+                                </div>
+                                <div style="background:#191925; border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:12px;">
+                                    <strong style="color:#a5b4fc">Sorting Logic:</strong><br>${logic}
+                                </div>
+                            </div>
+                            
+                            <div class="modal-footer" style="display:flex; gap:10px; justify-content:space-between; width:100%">
+                                <div style="display:flex; gap:8px;">
+                                    <button class="btn-edit" style="background:rgba(165,180,252,0.15); color:#a5b4fc; border:none; padding:8px 16px; border-radius:6px; font-weight:600; cursor:pointer; display:${item.status === 'approved' ? 'none' : 'block'}">Edit Title</button>
+                                    <button class="btn-reject" style="background:rgba(243,139,168,0.15); color:#f38ba8; border:1px solid rgba(243,139,168,0.3); padding:8px 16px; border-radius:6px; font-weight:600; cursor:pointer;">Reject/Delete</button>
+                                </div>
+                                <button class="btn-cancel">Close</button>
+                            </div>
+                        </div>
+                    `;
+                    document.body.appendChild(overlay);
+                    
+                    overlay.querySelector('.btn-cancel').addEventListener('click', () => document.body.removeChild(overlay));
+                    
+                    overlay.querySelector('.btn-edit').addEventListener('click', async () => {
+                        const newTitle = prompt("Edit Title:", item.proposed_title);
+                        if (newTitle && newTitle !== item.proposed_title) {
+                            const res = await fetch(`/api/media/edit/${item.id}`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ proposed_title: newTitle })
+                            });
+                            const result = await res.json();
+                            if (res.ok && result.success !== false) {
+                                document.body.removeChild(overlay);
+                                fetchMediaQueue();
+                            } else {
+                                alert("Failed to edit title: " + (result.error || "Unknown error"));
+                            }
+                        }
+                    });
+                    
+                    overlay.querySelector('.btn-reject').addEventListener('click', async () => {
+                        if (confirm("Are you sure you want to delete this media item? It will be removed from your library.")) {
+                            const res = await fetch(`/api/media/reject/${item.id}`, { method: 'POST' });
+                            const result = await res.json();
+                            if (res.ok && result.success !== false) {
+                                document.body.removeChild(overlay);
+                                fetchMediaQueue();
+                            } else {
+                                alert("Failed to reject/delete: " + (result.error || "Unknown error"));
+                            }
+                        }
+                    });
+                    
+                    overlay.querySelector('#reclassify-dropdown').addEventListener('change', async (e) => {
+                        const newType = e.target.value;
+                        e.target.disabled = true;
+                        const originalText = overlay.querySelector('.modal-title').innerText;
+                        overlay.querySelector('.modal-title').innerText = "Reclassifying... Please wait";
+                        
+                        try {
+                            const res = await fetch(`/api/media/reclassify/${item.id}`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ media_type: newType })
+                            });
+                            const result = await res.json();
+                            if (result.success) {
+                                document.body.removeChild(overlay);
+                                fetchMediaQueue();
+                            } else {
+                                alert("Failed to reclassify: " + result.error);
+                                overlay.querySelector('.modal-title').innerText = originalText;
+                                e.target.disabled = false;
+                            }
+                        } catch (err) {
+                            alert("Error during reclassification.");
+                            overlay.querySelector('.modal-title').innerText = originalText;
+                            e.target.disabled = false;
+                        }
+                    });
+                });
+                
+            } else {
+                card.style.cssText = 'background:#242435;border:1px solid rgba(255,255,255,0.07);border-radius:11px;padding:16px;display:flex;flex-direction:column;gap:10px;margin-bottom:8px';
+                
+                const flagHtml = item.needs_intervention ? '<span style="font-size:9.5px;font-weight:700;letter-spacing:0.3px;padding:2px 7px;border-radius:10px;background:rgba(243,139,168,0.15);color:#f38ba8;border:1px solid rgba(243,139,168,0.4);margin-left:8px">NEEDS REVIEW</span>' : '';
+                
+                const metaInfo = item.metadata ? (item.metadata.year ? `(${item.metadata.year})` : '') : '';
+                
+                card.innerHTML = `
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                        <div>
+                            <div style="font-size:11px;color:#9399b2;margin-bottom:4px">Original: ${item.original_filename}</div>
+                            <div style="font-size:15px;font-weight:600;color:#e4e4f0">${item.proposed_title} ${metaInfo} ${flagHtml}</div>
+                            <div style="font-size:11px;color:#a5b4fc;margin-top:4px"><i class="fa-solid fa-folder-tree" style="margin-right:4px"></i>${item.proposed_path}</div>
+                        </div>
+                    </div>
+                    <div style="display:flex;gap:8px;margin-top:8px">
+                      <div class="media-approve-btn" data-id="${item.id}" style="flex:1;text-align:center;padding:7px 0;border-radius:7px;background:#a6e3a1;color:#1e1e2e;font-size:12px;font-weight:700;cursor:pointer;transition:background 0.2s" onmouseover="this.style.background='#8fd88a'" onmouseout="this.style.background='#a6e3a1'">Approve</div>
+                      <div class="media-edit-btn" data-id="${item.id}" data-title="${item.proposed_title.replace(/"/g, '&quot;')}" style="flex:1;text-align:center;padding:7px 0;border-radius:7px;background:rgba(165,180,252,0.15);color:#a5b4fc;font-size:12px;font-weight:700;cursor:pointer;transition:background 0.2s" onmouseover="this.style.background='rgba(165,180,252,0.25)'" onmouseout="this.style.background='rgba(165,180,252,0.15)'">Edit Title</div>
+                      <div class="media-reject-btn" data-id="${item.id}" style="flex:1;text-align:center;padding:7px 0;border-radius:7px;border:1px solid rgba(243,139,168,0.35);color:#f38ba8;font-size:12px;font-weight:700;cursor:pointer;transition:background 0.2s" onmouseover="this.style.background='rgba(243,139,168,0.1)'" onmouseout="this.style.background='transparent'">Reject</div>
+                    </div>
+                `;
+                
+                card.querySelector('.media-approve-btn').addEventListener('click', async (e) => {
+                    e.currentTarget.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+                    await fetch(`/api/media/approve/${item.id}`, { method: 'POST' });
+                    fetchMediaQueue();
+                });
+                
+                card.querySelector('.media-reject-btn').addEventListener('click', async (e) => {
+                    if(confirm("Reject this media item?")) {
+                        await fetch(`/api/media/reject/${item.id}`, { method: 'POST' });
+                        fetchMediaQueue();
+                    }
+                });
+                
+                card.querySelector('.media-edit-btn').addEventListener('click', async (e) => {
+                    const newTitle = prompt("Edit Title:", e.currentTarget.dataset.title);
+                    if (newTitle && newTitle !== e.currentTarget.dataset.title) {
+                        await fetch(`/api/media/edit/${item.id}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ proposed_title: newTitle })
+                        });
+                        fetchMediaQueue();
+                    }
+                });
+            }
+            mediaQueueListEl.appendChild(card);
+        });
+    }
+
     // Initial load
     switchView('home');
     fetchArticles();
     fetchMods();
     fetchMinecraftStatus();
+    loadSettings();
     
     // Refresh Minecraft status every 30 seconds
     setInterval(fetchMinecraftStatus, 30000);
+    setInterval(fetchMods, 5000);
+    setInterval(fetchMediaQueue, 5000);
+    setInterval(() => {
+        if (document.getElementById('view-system').style.display !== 'none') {
+            loadSystemStatus();
+        }
+    }, 5000);
+    
+    function loadSystemStatus() {
+        fetch('/api/system/status')
+            .then(r => r.json())
+            .then(data => {
+                // Defcon
+                const defconEl = document.getElementById('system-defcon');
+                if (data.defcon && data.defcon.length > 0) {
+                    defconEl.style.display = 'block';
+                    defconEl.innerHTML = data.defcon.map(m => `<div><i class="fa-solid fa-triangle-exclamation"></i> ${m}</div>`).join('');
+                } else {
+                    defconEl.style.display = 'none';
+                    defconEl.innerHTML = '';
+                }
+                
+                // Disk
+                const diskEl = document.getElementById('system-disk-usage');
+                const diskSubEl = document.getElementById('system-disk-sub');
+                if (data.disk && data.disk.total) {
+                    const totalGb = (data.disk.total / 1073741824).toFixed(1);
+                    const freeGb = (data.disk.free / 1073741824).toFixed(1);
+                    diskEl.innerText = `${freeGb} GB Free`;
+                    diskSubEl.innerText = `Out of ${totalGb} GB Total`;
+                    
+                    if (data.disk.free_pct < 10) diskEl.style.color = '#f38ba8';
+                    else diskEl.style.color = '#e4e4f0';
+                }
+                
+                // Plex Mem
+                if (data.memory && data.memory.plex) {
+                    document.getElementById('system-plex-mem').innerText = data.memory.plex;
+                }
+                
+                // Daemon
+                const daemonEl = document.getElementById('system-daemon-status');
+                if (data.daemon_active) {
+                    daemonEl.innerText = 'Active (Running)';
+                    daemonEl.style.color = '#a6e3a1';
+                } else {
+                    daemonEl.innerText = 'Failed / Stopped';
+                    daemonEl.style.color = '#f38ba8';
+                }
+                
+                // Containers Grid
+                const gridEl = document.getElementById('system-containers-grid');
+                gridEl.innerHTML = '';
+                if (data.containers) {
+                    data.containers.forEach(c => {
+                        let statusColor = '#a6e3a1';
+                        let icon = 'fa-box';
+                        if (c.Status.includes('Exited') || c.Status.includes('unhealthy')) {
+                            statusColor = '#f38ba8';
+                        } else if (c.Status.includes('health: starting') || c.Status.includes('Waiting')) {
+                            statusColor = '#f9c97c';
+                        }
+                        
+                        gridEl.innerHTML += `
+                            <div style="background:#242435;border:1px solid rgba(255,255,255,0.06);border-radius:9px;padding:12px;display:flex;flex-direction:column;gap:6px">
+                                <div style="display:flex;align-items:center;gap:8px;font-weight:600;font-size:12.5px;color:#e4e4f0">
+                                    <i class="fa-solid ${icon}" style="color:${statusColor}"></i> ${c.Names}
+                                </div>
+                                <div style="font-size:10.5px;color:#9399b2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${c.Status}">
+                                    ${c.Status}
+                                </div>
+                            </div>
+                        `;
+                    });
+                }
+            })
+            .catch(err => console.error(err));
+    }
 });
