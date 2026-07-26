@@ -13,6 +13,10 @@
   - [x] SRE Hardening (Docker Socket Proxy, Autoheal labels, Resource Limits).
   - [x] Wire live monitoring into Dashboard (DEFCON banner, container states).
 
+- [ ] **Article Intake (Tag Filtering)**
+  - [ ] Add a dedicated tag-filter UI to the article intake tab — tags currently only match via the free-text search bar, no way to browse/filter by tag directly.
+  - [ ] Decide on presentation (filter chips, tag cloud, etc.) alongside the existing Homelab/News/Errors folder sidebar.
+
 - [ ] **Media Stack (Frontend & GUI Config)**
   - [ ] Connect Prowlarr indexers to Radarr & Sonarr.
   - [ ] Link Radarr & Sonarr to qBittorrent via API keys.

@@ -1,0 +1,8 @@
+nicegui
+anthropic==0.116.0
+google-genai==2.11.0
+mcstatus==14.0.0
+python-dotenv
+werkzeug
+pyyaml
+requests

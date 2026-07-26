@@ -1,0 +1,371 @@
+from nicegui import run, ui
+
+from components import ai_context, live_state, theme
+from components.confirm_dialog import confirm
+from components.util import client_alive
+from services import media
+
+MEDIA_TYPE_VISUALS = {
+    'movie': ('fa-solid fa-film', 'linear-gradient(150deg,#45475a,#313244)'),
+    'tv_show': ('fa-solid fa-tv', 'linear-gradient(150deg,#4a4370,#2f2b45)'),
+    'ebook': ('fa-solid fa-book', 'linear-gradient(150deg,#3a5245,#26332b)'),
+    'audiobook': ('fa-solid fa-headphones', 'linear-gradient(150deg,#5a4a3a,#332a22)'),
+    'comic': ('fa-solid fa-book-open', 'linear-gradient(150deg,#553a4a,#33222b)'),
+}
+
+
+def _type_visual(media_type: str) -> tuple[str, str]:
+    return MEDIA_TYPE_VISUALS.get(media_type, ('fa-solid fa-file', 'linear-gradient(150deg,#45475a,#313244)'))
+
+
+QUICK_LINKS = [
+    ('fa-solid fa-clapperboard', 'Radarr', 'http://100.87.245.107:7878'),
+    ('fa-solid fa-tv', 'Sonarr', 'http://100.87.245.107:8989'),
+    ('fa-solid fa-magnifying-glass', 'Prowlarr', 'http://100.87.245.107:9696'),
+    ('fa-solid fa-closed-captioning', 'Bazarr', 'http://100.87.245.107:6767'),
+    ('fa-solid fa-chart-simple', 'Tautulli', 'http://100.87.245.107:8181'),
+    ('fa-solid fa-list-check', 'Pulsarr', 'http://100.87.245.107:3003'),
+    ('fa-solid fa-heart-pulse', 'Uptime-Kuma', 'http://100.87.245.107:3001'),
+    ('fa-solid fa-download', 'qBittorrent', 'http://100.87.245.107:8090'),
+    ('fa-solid fa-play', 'Plex', 'http://100.87.245.107:32400/web'),
+]
+
+MEDIA_TYPES = [('movie', 'Movie'), ('tv_show', 'TV Show'), ('ebook', 'Ebook'),
+               ('audiobook', 'Audiobook'), ('comic', 'Comic')]
+
+
+async def _show_approved_details(item: dict, on_changed):
+    meta = item.get('metadata') or {}
+    with ui.dialog() as dialog, ui.card().style(
+            f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);border-radius:12px;'
+            f'padding:22px;width:550px;max-height:85vh'):
+        ui.label('Media Details').style(f'font-size:15px;font-weight:700;color:{theme.TEXT}')
+        ui.label(item['proposed_title']).style(f'font-size:12.5px;color:{theme.TEXT_MUTED};margin-bottom:10px')
+
+        with ui.column().classes('nq-custom-scroll').style(
+                'gap:12px;font-size:12.5px;max-height:55vh;overflow-y:auto;width:100%'):
+            with ui.row().classes('items-center no-wrap').style('gap:8px'):
+                ui.label('Category:').style(f'color:{theme.ACCENT};font-weight:700')
+                type_select = ui.select(dict(MEDIA_TYPES), value=item['media_type']).props('dense outlined')
+
+            with ui.column().style(
+                    f'background:#191925;border:1px solid {theme.BORDER};border-radius:8px;padding:12px;gap:4px'):
+                ui.label('Original File:').style(f'color:{theme.ACCENT};font-weight:700')
+                ui.label(item['original_filename'])
+                if item['original_filename'] != item.get('proposed_path'):
+                    ui.label('Target Path:').style(f'color:{theme.RED};font-weight:700;margin-top:4px')
+                    ui.label(item.get('proposed_path', ''))
+
+            for label, value in [('Series/Grouping:', meta.get('franchise', 'None')),
+                                  ('Short Description:', meta.get('short_description', 'No short description available.')),
+                                  ('Long Description:', meta.get('long_description', 'No long description available.')),
+                                  ('Sorting Logic:', meta.get('sort_logic', 'No logic recorded.'))]:
+                with ui.column().style(
+                        f'background:#191925;border:1px solid {theme.BORDER};border-radius:8px;padding:12px;gap:2px'):
+                    ui.label(label).style(f'color:{theme.ACCENT};font-weight:700')
+                    ui.label(value)
+
+        with ui.row().classes('justify-between w-full').style('margin-top:14px'):
+            with ui.row().style('gap:8px'):
+                ui.button('Reject/Delete', on_click=lambda: do_reject()).props('outline').style(
+                    f'color:{theme.RED}')
+                if item.get('status') == 'approved':
+                    ui.button('Undo Approval', on_click=lambda: do_undo()).props('outline').style(
+                        f'color:{theme.TEXT_MUTED}')
+            ui.button('Close', on_click=dialog.close).props('flat').style(f'color:{theme.TEXT_MUTED}')
+
+        async def on_reclassify(e):
+            type_select.disable()
+            success, error = await run.io_bound(media.reclassify, str(item['id']), e.value)
+            if success:
+                dialog.close()
+                await on_changed()
+                live_state.refresh_all(exclude='media')
+            else:
+                ui.notify(f'Failed to reclassify: {error}', type='negative')
+                type_select.enable()
+
+        type_select.on_value_change(on_reclassify)
+
+        async def do_reject():
+            if not await confirm('Delete media item?',
+                                  'It will be removed from your library.',
+                                  confirm_label='Delete', danger=True):
+                return
+            success, error = await run.io_bound(media.reject, str(item['id']))
+            if success:
+                dialog.close()
+                await on_changed()
+                live_state.refresh_all(exclude='media')
+            else:
+                ui.notify(f'Failed to reject/delete: {error}', type='negative')
+
+        async def do_undo():
+            success, error = await run.io_bound(media.undo, str(item['id']))
+            if success:
+                dialog.close()
+                await on_changed()
+                live_state.refresh_all(exclude='media')
+            else:
+                ui.notify(f'Failed to undo: {error}', type='negative')
+
+    await dialog
+
+
+async def _prompt_edit_title(current_title: str) -> str | None:
+    with ui.dialog() as dialog, ui.card().style(
+            f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:22px'):
+        ui.label('Edit Title').style(f'font-size:15px;font-weight:700;color:{theme.TEXT};margin-bottom:10px')
+        title_input = ui.input(value=current_title).style('width:100%').props('outlined dense')
+        with ui.row().classes('justify-end w-full').style('gap:10px;margin-top:14px'):
+            ui.button('Cancel', on_click=lambda: dialog.submit(None)).props('flat').style(
+                f'color:{theme.TEXT_MUTED}')
+            ui.button('Save', on_click=lambda: dialog.submit(title_input.value)).style(
+                f'background:{theme.ACCENT};color:{theme.BG};font-weight:700')
+    return await dialog
+
+
+MEDIA_FILTERS = [('', 'All')] + MEDIA_TYPES
+
+
+def build():
+    state = {'queue': [], 'type_filter': '', 'selected_ids': set()}
+
+    def filtered_queue():
+        if not state['type_filter']:
+            return state['queue']
+        return [i for i in state['queue'] if i.get('media_type') == state['type_filter']]
+
+    def toggle_select(item_id):
+        sel = state['selected_ids']
+        if item_id in sel:
+            sel.discard(item_id)
+        else:
+            sel.add(item_id)
+        render_queue.refresh()
+        render_bulk_bar.refresh()
+
+    def clear_selection():
+        state['selected_ids'].clear()
+        render_queue.refresh()
+        render_bulk_bar.refresh()
+
+    def set_type_filter(t):
+        state['type_filter'] = t
+        render_filters.refresh()
+        render_queue.refresh()
+
+    @ui.refreshable
+    def render_filters():
+        with ui.row().style('gap:8px;flex-wrap:wrap'):
+            for value, label in MEDIA_FILTERS:
+                active = value == state['type_filter']
+                with ui.row().classes('cursor-pointer').style(
+                        f'font-size:11.5px;font-weight:600;padding:6px 12px;border-radius:16px;'
+                        f'background:{theme.ACCENT_TINT if active else "rgba(255,255,255,0.05)"};'
+                        f'color:{theme.ACCENT if active else theme.TEXT_MUTED};'
+                        f'border:1px solid {theme.ACCENT if active else "transparent"}'
+                ).on('click', lambda _, v=value: set_type_filter(v)):
+                    ui.label(label)
+
+    @ui.refreshable
+    def render_bulk_bar():
+        sel = state['selected_ids']
+        if not sel:
+            return
+        with ui.row().classes('items-center no-wrap').style(
+                f'gap:12px;background:{theme.ACCENT_TINT};border:1px solid rgba(165,180,252,0.3);'
+                f'border-radius:10px;padding:10px 16px;margin-bottom:16px;width:100%'):
+            ui.label(f'{len(sel)} selected').style(f'font-size:12.5px;font-weight:600;color:{theme.ACCENT}')
+            ui.space()
+            ui.button('Approve all', on_click=lambda: bulk('approve')).style(
+                f'font-size:12px;font-weight:700;background:{theme.GREEN};color:{theme.BG}')
+            ui.button('Reject all', on_click=lambda: bulk('reject')).props('outline').style(
+                f'font-size:12px;font-weight:700;color:{theme.RED}')
+            ui.button('Clear', on_click=clear_selection).props('flat').style(
+                f'font-size:12px;font-weight:600;color:{theme.TEXT_MUTED}')
+
+    @ui.refreshable
+    def render_queue():
+        queue = filtered_queue()
+        if not queue:
+            with ui.column().classes('items-center justify-center').style(
+                    f'border:1.5px dashed rgba(255,255,255,0.12);border-radius:11px;padding:20px;'
+                    f'color:{theme.TEXT_DIM};font-size:12.5px;width:100%'):
+                ui.label('Queue is empty. Waiting for media...')
+            return
+        for item in queue:
+            iid = item['id']
+            selected = iid in state['selected_ids']
+            icon, grad = _type_visual(item.get('media_type'))
+            if item['status'] == 'approved':
+                with ui.row().classes('items-center no-wrap nq-nav-btn-hover').style(
+                        'background:rgba(166,227,161,0.05);border:1px solid rgba(166,227,161,0.2);'
+                        'border-radius:9px;padding:12px;gap:10px;width:100%'):
+                    with ui.element('div').classes('cursor-pointer').style(
+                            f'width:17px;height:17px;border-radius:5px;flex:none;'
+                            f'border:1.5px solid {theme.ACCENT if selected else "rgba(255,255,255,0.2)"};'
+                            f'background:{theme.ACCENT if selected else "transparent"};display:flex;'
+                            f'align-items:center;justify-content:center'
+                    ).on('click', lambda _, i=iid: toggle_select(i)):
+                        if selected:
+                            ui.icon('fa-solid fa-check').style(f'font-size:9px;color:{theme.BG}')
+                    with ui.element('div').style(
+                            f'width:34px;height:46px;border-radius:5px;background:{grad};flex:none;'
+                            f'display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.6)'):
+                        ui.icon(icon).style('font-size:14px')
+                    with ui.column().classes('cursor-pointer').style(
+                            'gap:2px;flex:1;min-width:0'
+                    ).on('click', lambda _, it=item: _show_approved_details(it, reload)):
+                        ui.label(f"Auto-sorted: {item['proposed_title']}").style(
+                            f'font-size:12.5px;font-weight:600;color:{theme.TEXT};overflow:hidden;'
+                            f'text-overflow:ellipsis;white-space:nowrap')
+                        with ui.row().classes('items-center no-wrap').style('gap:4px'):
+                            ui.icon('fa-solid fa-folder-tree').style(f'font-size:9px;color:{theme.TEXT_MUTED}')
+                            ui.label(item.get('proposed_path', '')).style(
+                                f'font-size:10.5px;color:{theme.TEXT_MUTED};overflow:hidden;'
+                                f'text-overflow:ellipsis;white-space:nowrap')
+                    ui.label(item.get('created_at', '')).style(f'font-size:10.5px;color:{theme.TEXT_DIM}')
+            else:
+                meta = item.get('metadata') or {}
+                year = f"({meta['year']})" if meta.get('year') else ''
+                with ui.row().style(
+                        f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.07);border-radius:11px;'
+                        f'padding:16px;gap:14px;width:100%'):
+                    with ui.element('div').classes('cursor-pointer').style(
+                            f'width:17px;height:17px;border-radius:5px;flex:none;margin-top:2px;'
+                            f'border:1.5px solid {theme.ACCENT if selected else "rgba(255,255,255,0.2)"};'
+                            f'background:{theme.ACCENT if selected else "transparent"};display:flex;'
+                            f'align-items:center;justify-content:center'
+                    ).on('click', lambda _, i=iid: toggle_select(i)):
+                        if selected:
+                            ui.icon('fa-solid fa-check').style(f'font-size:9px;color:{theme.BG}')
+                    with ui.element('div').style(
+                            f'width:62px;height:88px;border-radius:7px;background:{grad};flex:none;'
+                            f'display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.65)'):
+                        ui.icon(icon).style('font-size:22px')
+                    with ui.column().style('flex:1;min-width:0;gap:9px'):
+                        ui.label(f"Original: {item['original_filename']}").style(
+                            f'font-size:11px;color:{theme.TEXT_MUTED};overflow:hidden;'
+                            f'text-overflow:ellipsis;white-space:nowrap')
+                        with ui.row().classes('items-center no-wrap').style('gap:8px;flex-wrap:wrap'):
+                            ui.label(f"{item['proposed_title']} {year}").style(
+                                f'font-size:15px;font-weight:600;color:{theme.TEXT}')
+                            if item.get('needs_intervention'):
+                                ui.label('NEEDS REVIEW').style(
+                                    f'font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:10px;'
+                                    f'background:rgba(243,139,168,0.15);color:{theme.RED};'
+                                    f'border:1px solid rgba(243,139,168,0.4)')
+                        with ui.row().classes('items-center no-wrap').style('gap:4px'):
+                            ui.icon('fa-solid fa-folder-tree').style(f'font-size:9px;color:{theme.ACCENT}')
+                            ui.label(item.get('proposed_path', '')).style(f'font-size:11px;color:{theme.ACCENT}')
+
+                        with ui.row().style('gap:8px;width:100%;flex-wrap:wrap'):
+                            ui.button('Approve', on_click=lambda _, i=iid: do_approve(i)).style(
+                                f'background:{theme.GREEN};color:{theme.BG};font-weight:700')
+                            ui.button('Edit Title', on_click=lambda _, i=iid, t=item['proposed_title']:
+                                       do_edit(i, t)).props('flat').style(
+                                f'background:rgba(165,180,252,0.15);color:{theme.ACCENT}')
+                            ui.button('Reject', on_click=lambda _, i=iid: do_reject(i)).props(
+                                'outline').style(f'color:{theme.RED}')
+                            ui.button('Details', on_click=lambda _, it=item: _show_approved_details(it, reload)).props(
+                                'flat').style(f'color:{theme.TEXT_MUTED}')
+
+    async def do_approve(item_id):
+        success, error = await run.io_bound(media.approve, str(item_id))
+        if not success:
+            ui.notify(f'Approve failed: {error}', type='negative')
+        else:
+            ui.notify('Approved.', type='positive')
+        await reload()
+        live_state.refresh_all(exclude='media')
+
+    async def do_reject(item_id):
+        if not await confirm('Reject this media item?', 'This cannot be undone.',
+                              confirm_label='Reject', danger=True):
+            return
+        success, error = await run.io_bound(media.reject, str(item_id))
+        if not success:
+            ui.notify(f'Reject failed: {error}', type='negative')
+        else:
+            ui.notify('Rejected.', type='positive')
+        await reload()
+        live_state.refresh_all(exclude='media')
+
+    async def do_edit(item_id, current_title):
+        new_title = await _prompt_edit_title(current_title)
+        if not new_title or new_title == current_title:
+            return
+        success, error = await run.io_bound(media.edit, str(item_id), new_title)
+        if not success:
+            ui.notify(f'Edit failed: {error}', type='negative')
+        await reload()
+        live_state.refresh_all(exclude='media')
+
+    async def bulk(action: str):
+        ids = list(state['selected_ids'])
+        if action == 'reject' and not await confirm(
+                'Reject all selected?', f'{len(ids)} item(s) will be rejected. This cannot be undone.',
+                confirm_label='Reject all', danger=True):
+            return
+        results = await run.io_bound(media.bulk_action, action, ids)
+        failed = [r for r in results if not r['success']]
+        if failed:
+            ui.notify(f'{len(failed)} of {len(ids)} failed', type='negative')
+        else:
+            ui.notify(f'{action.capitalize()}d {len(ids)} item(s).', type='positive')
+        state['selected_ids'].clear()
+        await reload()
+        live_state.refresh_all(exclude='media')
+
+    async def reload():
+        queue = await run.io_bound(media.get_queue)
+        if client_alive():
+            state['queue'] = queue
+            render_queue.refresh()
+            render_bulk_bar.refresh()
+
+    def get_context_summary():
+        queue = state['queue']
+        pending = [i for i in queue if i['status'] != 'approved']
+        lines = [f"Viewing Media Curator. {len(queue)} item(s) in queue, {len(pending)} pending review."]
+        lines += [f"- {i['proposed_title']} ({i['id']}) [{i['status']}]" for i in pending[:15]]
+        return '\n'.join(lines)
+
+    def get_context_card():
+        queue = state['queue']
+        pending = [i for i in queue if i['status'] != 'approved']
+        needs_review = [i for i in pending if i.get('needs_intervention')]
+        pills = [f'{len(queue)} in queue', f'{len(pending)} pending']
+        focus = (f"Flagged: {needs_review[0]['proposed_title']}" if needs_review
+                 else 'Nothing flagged for review.')
+        return {'icon': 'fa-solid fa-film', 'tab': 'Media Curator', 'pills': pills, 'focus': focus}
+
+    ai_context.register('media', get_context_summary)
+    ai_context.register_card('media', get_context_card)
+    live_state.register('media', lambda: ui.timer(0.01, reload, once=True))
+
+    with ui.column().classes('nq-custom-scroll').style('flex:1;height:100%;overflow:auto;padding:24px 28px;gap:0'):
+        ui.label('MEDIA STACK').style(
+            f'font-size:11.5px;font-weight:700;letter-spacing:0.5px;color:{theme.TEXT_DIM};margin-bottom:12px')
+        with ui.row().style('gap:10px;flex-wrap:wrap;margin-bottom:24px'):
+            for icon, label, url in QUICK_LINKS:
+                with ui.row().classes('nq-nav-btn-hover items-center no-wrap cursor-pointer').style(
+                        f'border:1px solid rgba(165,180,252,0.3);border-radius:8px;padding:8px 12px;'
+                        f'color:{theme.ACCENT};font-size:12px;font-weight:600;gap:7px'
+                ).on('click', lambda _, u=url: ui.navigate.to(u, new_tab=True)):
+                    ui.icon(icon)
+                    ui.label(label)
+                    ui.icon('fa-solid fa-arrow-up-right-from-square').style('font-size:9px')
+
+        render_filters()
+        with ui.column().style('margin-top:16px;width:100%'):
+            render_bulk_bar()
+
+        ui.label('MEDIA QUEUE').style(
+            f'font-size:11.5px;font-weight:700;letter-spacing:0.5px;color:{theme.TEXT_DIM};margin-bottom:12px')
+        with ui.column().style('gap:14px;width:100%'):
+            render_queue()
+
+    ui.timer(0.05, reload, once=True)
+    ui.timer(5.0, reload)
