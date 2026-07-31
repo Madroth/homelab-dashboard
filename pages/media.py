@@ -76,7 +76,11 @@ async def _show_approved_details(item: dict, on_changed):
 
         async def on_reclassify(e):
             type_select.disable()
-            success, error = await run.io_bound(media.reclassify, str(item['id']), e.value)
+            result = await run.io_bound(media.reclassify, str(item['id']), e.value)
+            if result is None:
+                type_select.enable()
+                return
+            success, error = result
             if success:
                 dialog.close()
                 await on_changed()
@@ -92,7 +96,10 @@ async def _show_approved_details(item: dict, on_changed):
                                   'It will be removed from your library.',
                                   confirm_label='Delete', danger=True):
                 return
-            success, error = await run.io_bound(media.reject, str(item['id']))
+            result = await run.io_bound(media.reject, str(item['id']))
+            if result is None:
+                return
+            success, error = result
             if success:
                 dialog.close()
                 await on_changed()
@@ -101,7 +108,10 @@ async def _show_approved_details(item: dict, on_changed):
                 ui.notify(f'Failed to reject/delete: {error}', type='negative')
 
         async def do_undo():
-            success, error = await run.io_bound(media.undo, str(item['id']))
+            result = await run.io_bound(media.undo, str(item['id']))
+            if result is None:
+                return
+            success, error = result
             if success:
                 dialog.close()
                 await on_changed()
@@ -272,7 +282,10 @@ def build():
                                 'flat').style(f'color:{theme.TEXT_MUTED}')
 
     async def do_approve(item_id):
-        success, error = await run.io_bound(media.approve, str(item_id))
+        result = await run.io_bound(media.approve, str(item_id))
+        if result is None:
+            return
+        success, error = result
         if not success:
             ui.notify(f'Approve failed: {error}', type='negative')
         else:
@@ -284,7 +297,10 @@ def build():
         if not await confirm('Reject this media item?', 'This cannot be undone.',
                               confirm_label='Reject', danger=True):
             return
-        success, error = await run.io_bound(media.reject, str(item_id))
+        result = await run.io_bound(media.reject, str(item_id))
+        if result is None:
+            return
+        success, error = result
         if not success:
             ui.notify(f'Reject failed: {error}', type='negative')
         else:
@@ -296,7 +312,10 @@ def build():
         new_title = await _prompt_edit_title(current_title)
         if not new_title or new_title == current_title:
             return
-        success, error = await run.io_bound(media.edit, str(item_id), new_title)
+        result = await run.io_bound(media.edit, str(item_id), new_title)
+        if result is None:
+            return
+        success, error = result
         if not success:
             ui.notify(f'Edit failed: {error}', type='negative')
         await reload()
@@ -309,6 +328,8 @@ def build():
                 confirm_label='Reject all', danger=True):
             return
         results = await run.io_bound(media.bulk_action, action, ids)
+        if results is None:
+            return
         failed = [r for r in results if not r['success']]
         if failed:
             ui.notify(f'{len(failed)} of {len(ids)} failed', type='negative')
@@ -320,6 +341,8 @@ def build():
 
     async def reload():
         queue = await run.io_bound(media.get_queue)
+        if queue is None:
+            return
         if client_alive():
             state['queue'] = queue
             render_queue.refresh()

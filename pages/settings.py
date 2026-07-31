@@ -43,6 +43,8 @@ def build():
 
     async def load():
         data = await run.io_bound(settings.get_settings)
+        if data is None:
+            return
         if data.get('geminiApiKey'):
             gemini_input.value = data['geminiApiKey']
         if data.get('anthropicApiKey'):

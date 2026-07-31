@@ -2,11 +2,25 @@ import json
 import os
 import shutil
 import subprocess
+import time
 
 DAEMON_LOG_FILE = '/home/linuxbox/projects/media-curator/daemon.log'
 
+# get_status() is called independently by both pages/home.py and pages/system.py, each on
+# its own 15s poll, for every connected client -- with no caching that meant redundant
+# `docker ps`/`docker stats`/`systemctl` subprocess spawns piling up whenever those polls
+# landed close together, adding avoidable load on top of whatever else the host is doing
+# (e.g. an actively-played Minecraft server routinely wants a full CPU core). An 8s TTL
+# de-duplicates calls that land within the same window without making alerts noticeably stale.
+_STATUS_CACHE_TTL = 8.0
+_status_cache = {'time': 0.0, 'status': None}
+
 
 def get_status() -> dict:
+    now = time.time()
+    if _status_cache['status'] is not None and (now - _status_cache['time']) < _STATUS_CACHE_TTL:
+        return _status_cache['status']
+
     status = {'defcon': [], 'containers': [], 'disk': {}, 'memory': {}}
 
     try:
@@ -50,6 +64,8 @@ def get_status() -> dict:
     except Exception:
         status['daemon_active'] = False
 
+    _status_cache['time'] = now
+    _status_cache['status'] = status
     return status
 
 

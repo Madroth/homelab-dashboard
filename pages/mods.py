@@ -136,6 +136,8 @@ def build():
 
     async def do_approve(sid: str):
         result = await run.io_bound(mods.approve_mod, sid)
+        if result is None:
+            return
         if result.get('success'):
             ui.notify(result.get('message', 'Deployed.'), type='positive')
         else:
@@ -148,6 +150,8 @@ def build():
         if reason is None:
             return
         result = await run.io_bound(mods.reject_mod, sid, reason)
+        if result is None:
+            return
         if result.get('success'):
             ui.notify('Rejected.', type='positive')
         else:
@@ -158,6 +162,8 @@ def build():
     async def reload():
         staging = await run.io_bound(mods.get_staging)
         mod_map = await run.io_bound(mods.get_mods)
+        if staging is None or mod_map is None:
+            return
         if client_alive():
             state['staging'] = staging
             state['mods'] = mod_map

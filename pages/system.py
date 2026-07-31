@@ -102,6 +102,8 @@ def build():
 
     async def refresh_status():
         status = await run.io_bound(system.get_status)
+        if status is None:
+            return
         if client_alive():
             state['status'] = status
             render_defcon.refresh()
@@ -110,6 +112,8 @@ def build():
 
     async def refresh_logs():
         logs = await run.io_bound(system.get_logs)
+        if logs is None:
+            return
         if client_alive():
             state['logs'] = logs
             render_logs.refresh()

@@ -120,9 +120,25 @@ def _article_from_legacy(filename, content):
     }
 
 
+_articles_cache: dict = {'signature': None, 'articles': None}
+
+
+def _articles_dir_signature() -> tuple:
+    """Cheap (file, mtime) fingerprint of the articles directory -- a stat-only pass over
+    ~85 files costs ~1ms vs. ~1.3s to actually parse them all, so list_articles() (called
+    on every page load, by every tab's initial-load timer, and it only gets slower as the
+    archive grows) can skip the full re-parse whenever nothing has actually changed."""
+    files = glob.glob(os.path.join(ARTICLES_DIR, '*.md'))
+    return tuple(sorted((f, os.path.getmtime(f)) for f in files))
+
+
 def list_articles() -> list[dict]:
     if not os.path.exists(ARTICLES_DIR):
         return []
+
+    signature = _articles_dir_signature()
+    if signature == _articles_cache['signature']:
+        return _articles_cache['articles']
 
     files = glob.glob(os.path.join(ARTICLES_DIR, '*.md'))
     files.sort(reverse=True)
@@ -142,6 +158,8 @@ def list_articles() -> list[dict]:
         else:
             articles.append(_article_from_legacy(filename, content))
 
+    _articles_cache['signature'] = signature
+    _articles_cache['articles'] = articles
     return articles
 
 

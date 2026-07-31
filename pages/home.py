@@ -1,3 +1,4 @@
+import asyncio
 from typing import Callable
 
 from nicegui import run, ui
@@ -193,19 +194,25 @@ def build(on_navigate: Callable[[str], None]):
 
     async def _refresh_minecraft():
         status = await run.io_bound(minecraft.get_status)
-        if client_alive():
+        if status is not None and client_alive():
             state['minecraft'] = status
             _minecraft_card.refresh(status)
 
     async def reload_all():
-        result = await run.io_bound(
-            lambda: (
-                mods.get_staging(), mods.get_mods(), media.get_queue(),
-                system.get_status(), intake.list_articles(), intake.get_queue(),
-            ))
-        if result is None:
+        # Dispatched as separate concurrent io_bound calls (not one bundled lambda in a
+        # single thread) -- system.get_status()'s two `docker` subprocess calls plus
+        # intake.list_articles() parsing the whole archive add up to ~2.5s sequentially,
+        # which ran every 15s for every connected client regardless of visible tab and
+        # was long enough to occasionally starve the websocket's keep-alive ping. Running
+        # them in parallel caps the wall-clock cost at roughly the slowest single call.
+        results = await asyncio.gather(
+            run.io_bound(mods.get_staging), run.io_bound(mods.get_mods),
+            run.io_bound(media.get_queue), run.io_bound(system.get_status),
+            run.io_bound(intake.list_articles), run.io_bound(intake.get_queue),
+        )
+        if any(r is None for r in results):
             return
-        staging, mod_map, media_queue, sys_status, articles, intake_queue = result
+        staging, mod_map, media_queue, sys_status, articles, intake_queue = results
         if client_alive():
             state['staging'] = staging
             state['mod_map'] = mod_map

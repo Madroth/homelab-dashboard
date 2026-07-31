@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .env
 settings.json
+intake_state.json
+intake_conversations.json

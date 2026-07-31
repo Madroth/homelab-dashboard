@@ -84,7 +84,7 @@ def build():
         'select_mode': False, 'selected_ids': set(), 'rail_open': True,
         'selected': None, 'article_content': None, 'reader_tab': 'content', 'reader_mode': 'read',
         'discuss': {'model': 'claude', 'active_sources': {'article', 'repo', 'archive'}, 'thread': [], 'busy': False},
-        'focused_id': None,
+        'focused_id': None, 'articles_loaded': False,
     }
 
     def _wf(aid):
@@ -277,7 +277,10 @@ def build():
             return
         data = await run.io_bound(intake.get_article, aid)
         summary = (data.get('summary') if data else '') or art.get('why_it_matters') or art.get('snippet') or ''
-        success, error = await run.io_bound(plane.send_article_to_plane, art, summary)
+        result = await run.io_bound(plane.send_article_to_plane, art, summary)
+        if result is None:
+            return
+        success, error = result
         if success:
             await run.io_bound(intake_state.set_article_state, aid, read=True, archived=True)
             await reload_workflow()
@@ -501,6 +504,7 @@ def build():
         if arts is None:
             return
         state['articles'] = arts
+        state['articles_loaded'] = True
         if client_alive():
             render_folders.refresh()
             render_my_folders.refresh()
@@ -713,6 +717,13 @@ def build():
 
     @ui.refreshable
     def render_articles():
+        if not state['articles_loaded']:
+            with ui.column().classes('items-center justify-center').style(
+                    f'padding:32px 12px;gap:10px;color:{theme.TEXT_DIM};width:100%'):
+                ui.spinner(size='lg')
+                ui.label('Loading articles…').style('font-size:12.5px')
+            return
+
         arts = filtered_articles()
         if not arts:
             if state['tag_filters']:
