@@ -71,9 +71,26 @@ def _render_message(msg: dict, on_open_citation: Callable[[str], None]):
             _render_citation(cite, on_open_citation)
 
 
+REPO_LABEL = 'homelab-infra'  # the only repo currently wired into grounding (~/HomeLab)
+
+
+def _thinking_line(model_label: str, active: set[str]) -> str:
+    scope_bits = ['this article']
+    if 'archive' in active:
+        scope_bits.append('your archive')
+    if 'repo' in active:
+        scope_bits.append(REPO_LABEL)
+    if len(scope_bits) == 1:
+        scope = scope_bits[0]
+    else:
+        scope = ', '.join(scope_bits[:-1]) + f' + {scope_bits[-1]}'
+    return f'{model_label} is reading {scope}…'
+
+
 def build(article: dict, discuss_state: dict, on_send: Callable[[str], None],
           on_toggle_source: Callable[[str], None], on_select_model: Callable[[str], None],
-          on_clear_thread: Callable[[], None], on_open_citation: Callable[[str], None]):
+          on_clear_thread: Callable[[], None], on_open_citation: Callable[[str], None],
+          on_close_repo_scope: Callable[[], None] = lambda: None):
     active = discuss_state['active_sources']
     thread = discuss_state['thread']
 
@@ -91,27 +108,56 @@ def build(article: dict, discuss_state: dict, on_send: Callable[[str], None],
 
         archive_count = len(intake.list_articles())
         repo_count = repo_search.repo_file_count()
+        # 'article' is always on -- not a user choice, so it's rendered locked (no click
+        # handler, a lock glyph instead of the on/off dot) rather than as a real toggle.
         chips = [
-            ('article', 'This article', f"{article.get('reading_minutes', 1)} min read"),
-            ('repo', 'homelab repo', f"{repo_count} files"),
-            ('archive', 'Article archive', f"{archive_count} saved"),
+            ('article', 'This article', f"{article.get('reading_minutes', 1)} min read", True),
+            ('repo', REPO_LABEL, f"{repo_count} files", False),
+            ('archive', 'Article archive', f"{archive_count} saved", False),
         ]
         with ui.row().style('gap:6px;flex-wrap:wrap;padding:10px 16px 4px'):
-            for key, label, meta in chips:
+            for key, label, meta, locked in chips:
                 is_on = key in active
-                with ui.row().classes('items-center no-wrap cursor-pointer').style(
-                        f'gap:6px;padding:5px 10px;border-radius:14px;'
-                        f'background:{theme.ACCENT_TINT if is_on else "rgba(255,255,255,0.04)"};'
-                        f'border:1px solid {theme.ACCENT if is_on else "transparent"}'
-                ).on('click', lambda _, k=key: on_toggle_source(k)):
-                    ui.element('div').style(
-                        f'width:6px;height:6px;border-radius:50%;flex:none;'
-                        f'background:{theme.ACCENT if is_on else theme.TEXT_DIM}')
-                    ui.label(label).style(
-                        f'font-size:11.5px;font-weight:600;color:{theme.TEXT if is_on else theme.TEXT_MUTED}')
-                    ui.label(meta).style(f'font-size:10px;color:{theme.TEXT_DIM}')
+                with ui.element('div').style('position:relative'):
+                    row = ui.row().classes(
+                        'items-center no-wrap' + ('' if locked else ' cursor-pointer')
+                    ).style(
+                            f'gap:6px;padding:5px 10px;border-radius:14px;'
+                            f'background:{theme.ACCENT_TINT if is_on else "rgba(255,255,255,0.04)"};'
+                            f'border:1px solid {theme.ACCENT if is_on else "transparent"}')
+                    row.mark(f'discuss-chip-{key}')
+                    if not locked:
+                        row.on('click', lambda _, k=key: on_toggle_source(k))
+                    with row:
+                        if locked:
+                            ui.icon('fa-solid fa-lock').style(f'font-size:8px;color:{theme.ACCENT};flex:none')
+                        else:
+                            ui.element('div').style(
+                                f'width:6px;height:6px;border-radius:50%;flex:none;'
+                                f'background:{theme.ACCENT if is_on else theme.TEXT_DIM}')
+                        ui.label(label).style(
+                            f'font-size:11.5px;font-weight:600;color:{theme.TEXT if is_on else theme.TEXT_MUTED}')
+                        ui.label(meta).style(f'font-size:10px;color:{theme.TEXT_DIM}')
 
-        ui.label(f"homelab repo scanned live · {archive_count} articles in archive").style(
+                    if key == 'repo' and discuss_state.get('repo_scope_open'):
+                        with ui.column().style(
+                                f'position:absolute;top:34px;left:0;z-index:20;width:260px;'
+                                f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.1);'
+                                f'border-radius:10px;padding:12px;gap:8px;'
+                                f'box-shadow:0 8px 24px rgba(0,0,0,0.35)'):
+                            ui.label('Repo access').style(f'font-size:12px;font-weight:700;color:{theme.TEXT}')
+                            ui.label(
+                                f'Reads from {REPO_LABEL} only, and only on the turns you ask — '
+                                f'nothing is indexed or scanned in the background.'
+                            ).style(f'font-size:11px;line-height:1.5;color:{theme.TEXT_MUTED}')
+                            with ui.row().classes('items-center no-wrap').style('gap:6px'):
+                                ui.icon('fa-solid fa-code-branch').style(f'font-size:10px;color:{theme.GREEN}')
+                                ui.label(f'{REPO_LABEL} · {repo_count} files').style(
+                                    f'font-size:11px;color:{theme.TEXT}')
+                            ui.button('Got it', on_click=lambda: on_close_repo_scope()).props('flat dense').style(
+                                f'align-self:flex-end;color:{theme.ACCENT};font-size:11px')
+
+        ui.label(f"{REPO_LABEL} read on request · {archive_count} articles in archive").style(
             f'font-size:10px;color:{theme.TEXT_DIM};padding:0 16px 8px')
 
         with ui.column().classes('nq-custom-scroll').style('flex:1;overflow-y:auto;padding:8px 16px;gap:14px'):
@@ -128,9 +174,10 @@ def build(article: dict, discuss_state: dict, on_send: Callable[[str], None],
             for msg in thread:
                 _render_message(msg, on_open_citation)
             if discuss_state.get('busy'):
+                model_label = next(l for k, l, _ in MODELS if k == discuss_state['model'])
                 with ui.row().classes('items-center no-wrap').style(f'gap:8px;color:{theme.TEXT_MUTED}'):
                     ui.spinner(size='sm')
-                    ui.label('Thinking…').style('font-size:12px')
+                    ui.label(_thinking_line(model_label, active)).style('font-size:12px')
 
         with ui.row().classes('items-center no-wrap').style(
                 'padding:10px 16px;border-top:1px solid rgba(255,255,255,0.06);gap:8px'):

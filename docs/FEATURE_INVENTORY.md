@@ -44,27 +44,50 @@ Companion docs: `DESIGN_BRIEF.md` (what Claude Design needs), `IMPLEMENTATION_GU
 - [ ] **Thinnest page today** — meant to become a cross-page "what needs my attention"
       overview; current version only shows one card
 
-## Article Intake (`pages/intake.py`, `services/intake.py`)
+## Article Intake (`pages/intake.py`, `services/intake.py`, `services/intake_state.py`)
 
-- [ ] Folder sidebar: All / Homelab / News / Errors & Rejections, each with a live count
-- [ ] Free-text search — matches against title, snippet, tags, and full raw content
+Current as of the 2026-07-31 bug-fix pass — see `INTAKE_UPGRADE_BRIEF.md` for the full
+functional brief (data shapes, cross-cutting notes, and §6's list of what still needs a
+real Design pass). Summary checklist:
+
+- [ ] Collapsible rail: categories (All/Homelab/News/Errors & Rejections, live counts,
+      always excluding archived), user-created "My Folders" + a fixed Archived entry,
+      and a full searchable tag list (own filter box, per-tag counts, multi-select AND
+      filter)
+- [ ] Toolbar: free-text search (title/snippet/tags/full text), sort dropdown (date,
+      priority, title, unread-first, favorites-first), cards/table view toggle, Select
+      (bulk mode) button, keyboard-shortcut cheat-sheet modal
+- [ ] Summary line ("N articles · N unread" + active tag-filter count) and an "Include
+      archived" checkbox
 - [ ] Queue panel above the article list:
-  - [ ] Failed items shown first, red-tinted, click-to-retry
-  - [ ] Active items (pending/processing) shown with a retry-count badge when applicable
-- [ ] Article list: badge (Duplicate / Automated / Manual), date, title, source domain
-      (parsed from URL), snippet, up to 3 tags
-- [ ] Empty states: "No articles match '\<search\>'" vs "No articles found."
-- [ ] Click an article → loads full content into the reader pane (async, shows a spinner
-      while loading)
-- [ ] Reader pane actions: **Delete** (behind a confirm dialog), **Toggle Duplicate**,
-      **Resubmit** (re-queues by the article's original source URL, notifies
-      success/failure)
+  - [ ] Failed items shown first, visually distinguished, click-to-retry
+  - [ ] Active items (pending/processing) shown with a retry-count indicator when
+        applicable
+- [ ] Article list, both cards and table view: type badge (Duplicate/Automated/Manual),
+      priority flag, favorite indicator, Discuss message-count chip, date, reading-time
+      estimate, source domain, tags, read/unread visual distinction; cards view also
+      shows a snippet and up to 2 custom-folder labels
+- [ ] Table view sort headers reach all 5 sort modes (3 labeled + 2 icon-only)
+- [ ] Per-row actions (both views): toggle read/unread, toggle favorite, toggle
+      archived/unarchived, send to HomeLab (shows an in-flight state during the network
+      call), delete (confirm-gated)
+- [ ] Bulk-selection mode: per-row checkboxes, bulk action bar (mark read/unread,
+      favorite, archive, unarchive, move to folder, delete); selection clears on folder
+      switch
+- [ ] Keyboard shortcuts: j/k or arrows to move a highlighted-row cursor, Enter to open,
+      x to select, r/f/a to toggle read/favorite/archived, s to send, Del to delete, Esc
+      to clear cursor, ? for the cheat sheet
+- [ ] Empty states: no-tag-match, no-search-match, no-articles, and a loading state
+      before the first fetch completes
+- [ ] Reader pane, **Read mode**: badge/content-type/domain/date/reading-time header, a
+      "Why it matters · Priority" callout when present, Content/AI-Summary tab toggle,
+      Delete (confirm-gated) / Toggle Duplicate / Resubmit / Send to HomeLab actions
+- [ ] Reader pane, **Discuss mode** (built after the last Design pass — see
+      `INTAKE_UPGRADE_BRIEF.md` §6): 3-way model picker (Claude/Agy/Local), 3 toggleable
+      grounding-source chips (this article / homelab repo / article archive), suggested
+      starter prompts, message thread with tool-call indicators and expandable
+      repo/article citations, clear-thread action
 - [ ] Empty reader state: "Select an article to read"
-- [ ] **Data not yet surfaced anywhere in the UI**, present in the schema:
-      `content_type`, `primary_domain`, `priority_score`, `why_it_matters` — worth
-      exposing in the reskin, not just re-skinning what's already shown
-- [ ] Known open backlog item (not yet built): dedicated tag-filter UI — tags currently
-      only match via the free-text search box
 
 ## Mod Pipeline (`pages/mods.py`, `services/mods.py`)
 

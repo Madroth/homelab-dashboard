@@ -17,8 +17,18 @@ def register(key: str, refresh: Callable[[], None]) -> None:
     _REGISTRY.setdefault(cid, {})[key] = refresh
 
 
-def refresh_all(exclude: str | None = None) -> None:
-    for key, refresh in _REGISTRY.get(context.client.id, {}).items():
+def refresh_all(exclude: str | None = None, client=None) -> None:
+    """Pass `client` (captured early via components.util.capture_client()) when the
+    caller may have already torn down its own originating UI slot by this point (e.g.
+    a row handler that called its own refreshable.refresh() first) -- context.client
+    re-resolves via that slot on every access, so once it's gone this would otherwise
+    raise RuntimeError instead of just finding no client_id to look up.
+    """
+    try:
+        cid = client.id if client is not None else context.client.id
+    except RuntimeError:
+        return
+    for key, refresh in _REGISTRY.get(cid, {}).items():
         if key == exclude:
             continue
         try:

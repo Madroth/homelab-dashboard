@@ -1,30 +1,60 @@
+import re
+from datetime import datetime
 from urllib.parse import urlparse
 
 from nicegui import run, ui
 
-from components import ai_context, discuss_panel, theme
+from components import ai_context, discuss_panel, live_state, theme
 from components.confirm_dialog import confirm
-from components.util import client_alive
+from components.util import capture_client, client_alive
 from services import intake, intake_state, plane
 from services.ai import discuss
 
-FOLDERS = [
-    ('all', 'fa-solid fa-inbox', 'All Articles'),
-    ('homelab', 'fa-solid fa-server', 'Homelab'),
-    ('news', 'fa-solid fa-newspaper', 'News'),
-    ('errors', 'fa-solid fa-triangle-exclamation', 'Errors & Rejections'),
-]
-
 SORT_OPTIONS = [
-    ('date', 'Newest first'), ('priority', 'Priority'), ('title', 'Title A-Z'),
-    ('unread', 'Unread first'), ('favorite', 'Favorites first'),
+    ('unread', 'Unread first'), ('date', 'Newest first'), ('priority', 'Priority'),
+    ('title', 'Title A-Z'), ('favorite', 'Favorites first'),
 ]
 
 SHORTCUTS = [
     ('j / ↓', 'Next article'), ('k / ↑', 'Previous article'), ('Enter', 'Open focused article'),
     ('x', 'Toggle selection'), ('r', 'Toggle read/unread'), ('f', 'Toggle favorite'),
-    ('s', 'Send to HomeLab'), ('Del', 'Delete'), ('?', 'This cheat sheet'), ('Esc', 'Close'),
+    ('a', 'Toggle archived'), ('s', 'Send to HomeLab'), ('Del', 'Delete'),
+    ('?', 'This cheat sheet'), ('Esc', 'Close'),
 ]
+
+# Fixed status entries in the folder/status dropdown. Custom folders (from
+# intake_state.list_folders()) are appended after these. Archiving semantics (agreed
+# with Chris 2026-07-31): archived hides an article from 'all' and from plain
+# tag-browsing only -- Favorites and Duplicates are deliberate "keep visible to me"
+# collections, independent of triage state, so both INCLUDE archived items. Custom
+# folders get the same treatment as Favorites (a folder is a deliberate collection too).
+STATUS_ENTRIES = [
+    ('all', 'fa-solid fa-inbox', 'All'),
+    ('favorites', 'fa-solid fa-star', 'Favorites'),
+    ('duplicates', 'fa-solid fa-clone', 'Duplicates'),
+    ('archived', 'fa-solid fa-box-archive', 'Archived'),
+]
+
+_FILENAME_TS_RE = re.compile(r'^(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})')
+
+
+def _date_sort_key(article: dict) -> datetime:
+    """Prefers the parsed 'date' field (reliable for frontmatter articles -- it's
+    date_processed[:19] in '%Y-%m-%d %H:%M:%S'); falls back to the filename's own
+    embedded timestamp for legacy articles whose 'date' is unparseable free text --
+    every file (frontmatter or legacy) is named YYYY-MM-DD-HHMMSS-*.md, so this
+    fallback never raises and stays chronologically meaningful."""
+    raw = (article.get('date') or '').strip()
+    try:
+        return datetime.strptime(raw[:19], '%Y-%m-%d %H:%M:%S')
+    except ValueError:
+        m = _FILENAME_TS_RE.match(article.get('id') or '')
+        if m:
+            try:
+                return datetime(*(int(g) for g in m.groups()))
+            except ValueError:
+                pass
+        return datetime.min
 
 
 def _short_url(url: str) -> str:
@@ -79,51 +109,95 @@ async def _show_cheatsheet():
 
 def build():
     state = {
-        'articles': [], 'queue': [], 'workflow': {}, 'folders': [], 'prefs': {'view': 'cards', 'sort': 'date'},
-        'folder': 'all', 'tag_filters': set(), 'tag_search': '', 'search': '', 'include_archived': False,
-        'select_mode': False, 'selected_ids': set(), 'rail_open': True,
+        'articles': [], 'queue': [], 'workflow': {}, 'folders': [],
+        'prefs': {'density': 'cozy', 'sort': 'unread'},
+        'folder': 'all', 'tag_filters': set(), 'tag_search': '', 'search': '',
+        'select_mode': False, 'selected_ids': set(),
         'selected': None, 'article_content': None, 'reader_tab': 'content', 'reader_mode': 'read',
-        'discuss': {'model': 'claude', 'active_sources': {'article', 'repo', 'archive'}, 'thread': [], 'busy': False},
-        'focused_id': None, 'articles_loaded': False,
+        'reader_size': 'normal',
+        'discuss': {'model': 'claude', 'active_sources': {'article', 'archive'},
+                     'repo_scope_open': False, 'thread': [], 'busy': False},
+        'focused_id': None, 'articles_loaded': False, 'sending_ids': set(), 'confirming_ids': set(),
+        'thread_counts': {},
     }
+    # Populated by render_tag_dropdown() each time it (re)builds; lets select_tag()
+    # restyle a single row's checked-state in place instead of refreshing the whole
+    # dropdown, which would otherwise close it (a NiceGUI @ui.refreshable tears down
+    # and recreates its subtree on .refresh(), and a recreated ui.menu() defaults to
+    # closed) -- needed so picking several tags in one visit doesn't reopen the menu
+    # after every click.
+    tag_row_elements: dict[str, tuple] = {}
+    # Captured by render_toolbar() when it creates the search input; lets
+    # clear_search() reset the box's displayed value directly rather than needing to
+    # refresh (and thereby tear down/rebuild) the toolbar that contains it.
+    ui_refs: dict[str, object] = {'search_input': None}
+    # Per-article @ui.refreshable closures (created lazily, keyed by article id) --
+    # lets a single-article change (favorite/read/archived) re-render just that one
+    # row instead of paying render_articles.refresh()'s full-list rebuild cost (all
+    # visible rows torn down and recreated) for a change that affects one row's
+    # visuals. See _get_row_refreshable() below.
+    row_refreshables: dict[str, object] = {}
 
     def _wf(aid):
         return state['workflow'].get(aid, {'read': False, 'favorite': False, 'archived': False})
 
-    def folder_counts():
-        arts = state['articles']
-        failed = [q for q in state['queue'] if q.get('status') == 'failed']
-        return {
-            'all': len(arts),
-            'homelab': len([a for a in arts if a['category'] == 'Homelab' and not a['is_duplicate']]),
-            'news': len([a for a in arts if a['category'] == 'News' and not a['is_duplicate']]),
-            'errors': len([a for a in arts if a['is_duplicate']]) + len(failed),
-        }
+    def _apply_workflow_change(aid, **fields):
+        """Patch state['workflow'][aid] in memory from a value we already just wrote to
+        disk -- avoids re-fetching all_article_states() (every article) for a change we
+        know affects exactly one."""
+        current = dict(_wf(aid))
+        current.update(fields)
+        state['workflow'][aid] = current
+        return current
 
-    def my_folder_counts():
-        return {name: len([a for a in state['articles'] if name in a.get('user_folders', [])])
-                for name in state['folders']}
+    def _refresh_after_workflow_change(aid, before_ids):
+        """Single-article read/favorite/archived toggles only need to touch that one
+        row's visuals in the common case. But the same toggle can also change which
+        articles are visible (e.g. unfavoriting while viewing the Favorites folder) or
+        their order (e.g. toggling read under the default 'Unread first' sort) --
+        recomputing the full list is the only way to know that reliably (mirrors
+        filtered_articles()'s own filter/sort rules exactly, no risk of the two
+        drifting apart), but it's cheap in itself: comparing two lists of ~100 ids is
+        microseconds, unlike render_articles.refresh()'s full row rebuild. Only pay
+        that full rebuild when membership/order actually changed; otherwise refresh
+        just the one row that changed."""
+        after_ids = [a['id'] for a in filtered_articles()]
+        if before_ids != after_ids:
+            render_articles.refresh()
+        else:
+            _get_row_refreshable(aid).refresh()
 
-    def archived_count():
-        return len([a for a in state['articles'] if _wf(a['id'])['archived']])
+    # ---------- folder scoping (archiving semantics live here) ----------
 
     def _folder_scoped_articles():
         arts = state['articles']
         folder = state['folder']
-        if folder == 'homelab':
-            arts = [a for a in arts if a['category'] == 'Homelab' and not a['is_duplicate']]
-        elif folder == 'news':
-            arts = [a for a in arts if a['category'] == 'News' and not a['is_duplicate']]
-        elif folder == 'errors':
-            arts = [a for a in arts if a['is_duplicate']]
-        elif folder == 'archived':
+        if folder == 'archived':
             return [a for a in arts if _wf(a['id'])['archived']]
-        elif folder.startswith('custom:'):
+        if folder == 'favorites':
+            return [a for a in arts if _wf(a['id'])['favorite']]
+        if folder == 'duplicates':
+            return [a for a in arts if a['is_duplicate']]
+        if folder.startswith('custom:'):
             name = folder[len('custom:'):]
-            arts = [a for a in arts if name in a.get('user_folders', [])]
-        if not state['include_archived']:
-            arts = [a for a in arts if not _wf(a['id'])['archived']]
-        return arts
+            return [a for a in arts if name in a.get('user_folders', [])]
+        # 'all' -- the main triage view: hides archived (handled) and duplicates
+        # (pipeline noise, reviewed separately via the Duplicates entry instead)
+        return [a for a in arts if not _wf(a['id'])['archived'] and not a['is_duplicate']]
+
+    def status_counts():
+        arts = state['articles']
+        live = [a for a in arts if not _wf(a['id'])['archived']]
+        return {
+            'all': len(live),
+            'favorites': len([a for a in arts if _wf(a['id'])['favorite']]),
+            'duplicates': len([a for a in arts if a['is_duplicate']]),
+            'archived': len([a for a in arts if _wf(a['id'])['archived']]),
+        }
+
+    def custom_folder_counts():
+        return {name: len([a for a in state['articles'] if name in a.get('user_folders', [])])
+                for name in state['folders']}
 
     def available_tags():
         counts = {}
@@ -137,7 +211,9 @@ def build():
         return tags
 
     def _sorted_articles(arts):
-        sort = state['prefs'].get('sort', 'date')
+        sort = state['prefs'].get('sort', 'unread')
+        if sort == 'date':
+            return sorted(arts, key=_date_sort_key, reverse=True)
         if sort == 'priority':
             return sorted(arts, key=lambda a: -(a.get('priority_score') or 0))
         if sort == 'title':
@@ -160,51 +236,69 @@ def build():
                     any(term in t.lower() for t in a.get('tags', []))]
         return _sorted_articles(arts)
 
-    # ---------- folder / tag / search / view actions ----------
+    # ---------- folder / tag / search / density / select actions ----------
 
     def select_folder(key):
         state['folder'] = key
         state['tag_filters'] = set()
-        render_folders.refresh()
-        render_my_folders.refresh()
-        render_tags.refresh()
+        state['selected_ids'] = set()
+        state['select_mode'] = False
+        render_folder_dropdown.refresh()
+        render_tag_dropdown.refresh()
+        render_filter_chips.refresh()
         render_articles.refresh()
-
-    def toggle_rail():
-        state['rail_open'] = not state['rail_open']
-        render_rail.refresh()
+        render_bulk_bar.refresh()
 
     def select_tag(tag):
         if tag in state['tag_filters']:
             state['tag_filters'].discard(tag)
         else:
             state['tag_filters'].add(tag)
-        render_tags.refresh()
+        active = tag in state['tag_filters']
+        refs = tag_row_elements.get(tag)
+        if refs:
+            row_el, label_el = refs
+            row_el.style(f'background:{theme.ACCENT_TINT if active else "transparent"}')
+            label_el.style(
+                f'flex:1;font-size:12px;color:{theme.ACCENT if active else theme.TEXT_MUTED};'
+                f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap')
         render_articles.refresh()
-        render_toolbar_row2.refresh()
+        render_header.refresh()
+        render_filter_chips.refresh()
 
     def clear_tags():
         state['tag_filters'] = set()
-        render_tags.refresh()
+        render_tag_dropdown.refresh()
         render_articles.refresh()
-        render_toolbar_row2.refresh()
+        render_header.refresh()
+        render_filter_chips.refresh()
 
     def on_tag_search(e):
         state['tag_search'] = e.value or ''
-        render_tags.refresh()
+        render_tag_dropdown.refresh()
 
     def on_search(e):
         state['search'] = e.value or ''
         render_articles.refresh()
+        render_header.refresh()
+        render_filter_chips.refresh()
+
+    def clear_search():
+        state['search'] = ''
+        if ui_refs['search_input'] is not None:
+            ui_refs['search_input'].value = ''
+        render_articles.refresh()
+        render_header.refresh()
+        render_filter_chips.refresh()
 
     async def set_sort(value):
         state['prefs']['sort'] = value
         await run.io_bound(intake_state.set_prefs, sort=value)
         render_articles.refresh()
 
-    async def set_view(value):
-        state['prefs']['view'] = value
-        await run.io_bound(intake_state.set_prefs, view=value)
+    async def set_density(value):
+        state['prefs']['density'] = value
+        await run.io_bound(intake_state.set_prefs, density=value)
         render_articles.refresh()
 
     def toggle_select_mode():
@@ -227,10 +321,6 @@ def build():
         render_articles.refresh()
         render_bulk_bar.refresh()
 
-    def toggle_include_archived(e):
-        state['include_archived'] = e.value
-        render_articles.refresh()
-
     async def create_new_folder():
         with ui.dialog() as dialog, ui.card().style(
                 f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);border-radius:12px;'
@@ -248,55 +338,119 @@ def build():
             folders = await run.io_bound(intake_state.list_folders)
             if folders is not None:
                 state['folders'] = folders
-            render_my_folders.refresh()
+            render_folder_dropdown.refresh()
 
     # ---------- workflow state (read/favorite/archived) ----------
 
     async def reload_workflow():
+        # Captured up front: render_articles.refresh() below tears down this handler's
+        # originating row/list slot, and live_state.refresh_all() below that would
+        # otherwise re-resolve context.client fresh and find it gone. See
+        # capture_client()'s docstring for the full mechanism.
+        client = capture_client()
         wf = await run.io_bound(intake_state.all_article_states)
-        if wf is not None and client_alive():
+        if wf is not None and client_alive(client):
             state['workflow'] = wf
             render_articles.refresh()
-            render_folders.refresh()
-            render_my_folders.refresh()
+            render_folder_dropdown.refresh()
+            render_header.refresh()
             render_reader.refresh()
+            live_state.refresh_all(exclude='intake', client=client)
 
     async def toggle_read(aid):
+        client = capture_client()
         new_val = not _wf(aid)['read']
+        before_ids = [a['id'] for a in filtered_articles()]
         await run.io_bound(intake_state.set_article_state, aid, read=new_val)
-        await reload_workflow()
+        if client_alive(client):
+            _apply_workflow_change(aid, read=new_val)
+            _refresh_after_workflow_change(aid, before_ids)
+            render_header.refresh()
+            live_state.refresh_all(exclude='intake', client=client)
 
     async def toggle_favorite(aid):
+        client = capture_client()
         new_val = not _wf(aid)['favorite']
+        before_ids = [a['id'] for a in filtered_articles()]
         await run.io_bound(intake_state.set_article_state, aid, favorite=new_val)
-        await reload_workflow()
+        if client_alive(client):
+            _apply_workflow_change(aid, favorite=new_val)
+            _refresh_after_workflow_change(aid, before_ids)
+            render_folder_dropdown.refresh()
+
+    async def toggle_archived(aid):
+        client = capture_client()
+        new_val = not _wf(aid)['archived']
+        before_ids = [a['id'] for a in filtered_articles()]
+        await run.io_bound(intake_state.set_article_state, aid, archived=new_val)
+        if not client_alive(client):
+            return
+        _apply_workflow_change(aid, archived=new_val)
+        _refresh_after_workflow_change(aid, before_ids)
+        render_folder_dropdown.refresh()
+        render_header.refresh()
+        live_state.refresh_all(exclude='intake', client=client)
 
     async def send_to_homelab(aid):
+        if aid in state['sending_ids']:
+            return
         art = next((a for a in state['articles'] if a['id'] == aid), None)
         if not art:
             return
-        data = await run.io_bound(intake.get_article, aid)
-        summary = (data.get('summary') if data else '') or art.get('why_it_matters') or art.get('snippet') or ''
-        result = await run.io_bound(plane.send_article_to_plane, art, summary)
+        # Captured before render_articles.refresh() below tears down this handler's
+        # originating row slot -- see capture_client()'s docstring for the full
+        # mechanism. Without this, every client_alive() check past that refresh would
+        # wrongly read as "tab disconnected" and silently skip the result toast/refresh.
+        client = capture_client()
+        state['sending_ids'].add(aid)
+        render_articles.refresh()
+        if state.get('selected') == aid:
+            render_reader.refresh()
+        try:
+            data = await run.io_bound(intake.get_article, aid)
+            summary = (data.get('summary') if data else '') or art.get('why_it_matters') or art.get('snippet') or ''
+            result = await run.io_bound(plane.send_article_to_plane, art, summary)
+        finally:
+            state['sending_ids'].discard(aid)
         if result is None:
+            if client_alive(client):
+                render_articles.refresh()
+                if state.get('selected') == aid:
+                    render_reader.refresh()
             return
         success, error = result
         if success:
+            # Persist unconditionally (mirrors toggle_read/toggle_favorite/toggle_archived) --
+            # the Plane to-do was really created, so local state must reflect that even if
+            # the tab closes mid-request; only the in-memory patch/refresh needs a live client.
             await run.io_bound(intake_state.set_article_state, aid, read=True, archived=True)
-            await reload_workflow()
-            ui.notify('Sent to HomeLab · to-do created, article archived.', type='positive')
+            if client_alive(client):
+                _apply_workflow_change(aid, read=True, archived=True)
+                render_articles.refresh()
+                render_folder_dropdown.refresh()
+                render_header.refresh()
+                live_state.refresh_all(exclude='intake', client=client)
+                if state.get('selected') == aid:
+                    render_reader.refresh()
+                ui.notify('Sent to HomeLab · to-do created, article archived.', type='positive')
         else:
-            ui.notify(f'Failed to send to HomeLab: {error}', type='negative')
+            if client_alive(client):
+                render_articles.refresh()
+                if state.get('selected') == aid:
+                    render_reader.refresh()
+                ui.notify(f'Failed to send to HomeLab: {error}', type='negative')
 
     # ---------- bulk actions ----------
 
-    async def bulk_mark(read=None, favorite=None):
+    async def bulk_mark(read=None, favorite=None, archived=None):
         ids = list(state['selected_ids'])
         fields = {}
         if read is not None:
             fields['read'] = read
         if favorite is not None:
             fields['favorite'] = favorite
+        if archived is not None:
+            fields['archived'] = archived
         await run.io_bound(intake_state.bulk_set_article_state, ids, **fields)
         await reload_workflow()
         ui.notify(f'{len(ids)} article(s) updated', type='positive')
@@ -322,20 +476,53 @@ def build():
                               confirm_label='Delete', danger=True):
             return
         for aid in ids:
-            await run.io_bound(intake.delete_article, aid)
-        state['selected_ids'] = set()
+            await _delete_article_and_cleanup(aid)
         await reload_articles()
 
     # ---------- reader ----------
 
-    def select_article(aid):
+    async def move_focus(delta):
+        ids = [a['id'] for a in filtered_articles()]
+        if not ids:
+            return
+        cur = state.get('focused_id')
+        idx = ids.index(cur) if cur in ids else -1
+        new_idx = min(max(idx + delta, 0), len(ids) - 1)
+        state['focused_id'] = ids[new_idx]
+        render_articles.refresh()
+        if state.get('selected'):
+            await select_article(state['focused_id'])
+
+    async def select_article(aid):
+        # Captured *before* render_articles.refresh() below: that refresh rebuilds
+        # the clicked row, and NiceGUI runs this whole handler (every await included)
+        # inside the slot the click captured at dispatch time. Once this function
+        # destroys its own originating slot, context.client stops resolving for the
+        # rest of the handler -- load_article_content's client_alive() check would
+        # silently see a RuntimeError-turned-False and skip populating the reader
+        # forever, even though the browser tab never went anywhere. See
+        # components/util.py's capture_client() docstring for the full mechanism.
+        client = capture_client()
         state['selected'] = aid
         state['article_content'] = None
         state['reader_tab'] = 'content'
         state['reader_mode'] = 'read'
         state['focused_id'] = aid
+        # update_layout() only adjusts the (persistent) list/reader columns' own
+        # width/visibility -- it never tears down the list itself, so scroll position
+        # survives opening/closing/resizing the reader. render_articles still needs
+        # its own refresh to move the focused-row highlight; render_reader to load the
+        # newly-selected article's content.
+        update_layout()
+        render_articles.refresh()
         render_reader.refresh()
-        ui.timer(0.01, lambda: load_article_content(aid), once=True)
+        await load_article_content(aid, client)
+
+    def close_reader():
+        state['selected'] = None
+        state['reader_size'] = 'normal'
+        update_layout()
+        render_reader.refresh()
 
     def set_reader_tab(tab):
         state['reader_tab'] = tab
@@ -344,41 +531,97 @@ def build():
     async def set_reader_mode(mode):
         state['reader_mode'] = mode
         if mode == 'discuss' and state['selected']:
-            thread = await run.io_bound(intake_state.get_thread, state['selected'])
+            aid = state['selected']
+            thread = await run.io_bound(intake_state.get_thread, aid)
+            sources = await run.io_bound(intake_state.get_sources, aid)
             state['discuss']['thread'] = thread if thread is not None else []
+            active = {'article'}
+            if sources is None or sources.get('archive', True):
+                active.add('archive')
+            if sources and sources.get('repos'):
+                active.add('repo')
+            state['discuss']['active_sources'] = active
+            state['discuss']['repo_scope_open'] = False
+            # Always ensure full width for Discuss regardless of the size it was at
+            # before -- the original condition only widened from exactly 'normal', so
+            # entering Discuss while already at 'wide' left both the article pane and
+            # the chat squeezed into 860px with no expansion at all.
+            if state['reader_size'] != 'full':
+                state['reader_size'] = 'full'
+                update_layout()
+                render_reader.refresh()
+                return
         render_reader.refresh()
 
-    async def load_article_content(aid):
+    async def open_discuss(aid):
+        await select_article(aid)
+        await set_reader_mode('discuss')
+
+    def cycle_reader_wider():
+        if state['reader_size'] == 'normal':
+            state['reader_size'] = 'wide'
+        elif state['reader_size'] == 'wide':
+            state['reader_size'] = 'full'
+        update_layout()
+        render_reader.refresh()
+
+    def reset_reader_size():
+        state['reader_size'] = 'normal'
+        update_layout()
+        render_reader.refresh()
+
+    async def load_article_content(aid, client=None):
         data = await run.io_bound(intake.get_article, aid)
-        if client_alive() and state.get('selected') == aid:
+        if client_alive(client) and state.get('selected') == aid:
             state['article_content'] = data or {'content': '*Error loading article.*'}
             render_reader.refresh()
 
-    async def delete_current():
-        aid = state.get('selected')
-        if not aid:
-            return
-        if not await confirm('Delete article?', 'Permanently delete this article?',
-                              confirm_label='Delete', danger=True):
-            return
+    async def _delete_article_and_cleanup(aid):
+        """No-confirm delete primitive shared by every delete path (single, table-row,
+        keyboard, bulk) -- only clears state['selected']/blanks the reader if the
+        deleted article is the one actually open, so deleting an unrelated
+        keyboard-focused or bulk-selected row never touches an untouched open reader."""
         await run.io_bound(intake.delete_article, aid)
-        state['selected'] = None
-        if client_alive():
+        if state.get('selected') == aid:
+            state['selected'] = None
+            if client_alive():
+                render_reader.refresh()
+        if state.get('focused_id') == aid:
+            state['focused_id'] = None
+        state['selected_ids'].discard(aid)
+        state['confirming_ids'].discard(aid)
+
+    def request_delete(aid):
+        """Single-row/keyboard delete confirmation is inline (the row's action column
+        swaps to 'Delete? Yes/No') rather than a modal -- bulk delete keeps its modal
+        (see bulk_delete()), since an inline per-row confirm doesn't make sense for a
+        multi-row action."""
+        state['confirming_ids'].add(aid)
+        render_articles.refresh()
+        if state.get('selected') == aid:
             render_reader.refresh()
+
+    def cancel_delete(aid):
+        state['confirming_ids'].discard(aid)
+        render_articles.refresh()
+        if state.get('selected') == aid:
+            render_reader.refresh()
+
+    async def confirm_delete(aid):
+        await _delete_article_and_cleanup(aid)
         await reload_articles()
 
-    async def mark_dup_current():
-        aid = state.get('selected')
-        if not aid:
-            return
+    async def mark_duplicate_row(aid):
+        # Captured before reload_articles(), whose own render_articles.refresh() would
+        # otherwise tear down this handler's originating row slot -- see
+        # capture_client()'s docstring and select_article() above for the full mechanism.
+        client = capture_client()
         await run.io_bound(intake.mark_duplicate, aid)
         await reload_articles()
-        await load_article_content(aid)
+        if state.get('selected') == aid:
+            await load_article_content(aid, client)
 
-    async def resubmit_current():
-        aid = state.get('selected')
-        if not aid:
-            return
+    async def resubmit_row(aid):
         result = await run.io_bound(intake.resubmit_article, aid)
         if result is None:
             return
@@ -388,14 +631,43 @@ def build():
         else:
             ui.notify(f"Resubmit failed: {result.get('error')}", type='negative')
 
+    async def move_article_to_folder(aid):
+        folder = await _prompt_folder_choice(state['folders'])
+        if not folder:
+            return
+        if folder not in state['folders']:
+            await run.io_bound(intake_state.create_folder, folder)
+            folders = await run.io_bound(intake_state.list_folders)
+            if folders is not None:
+                state['folders'] = folders
+        await run.io_bound(intake.add_to_folder, aid, folder)
+        await reload_articles()
+        ui.notify(f'Moved to "{folder}"', type='positive')
+
     # ---------- Discuss ----------
 
-    def discuss_toggle_source(source):
+    async def discuss_toggle_source(source):
+        if source == 'article':
+            return  # locked on, not a user choice
         active = state['discuss']['active_sources']
         if source in active:
             active.discard(source)
         else:
             active.add(source)
+        if source == 'repo':
+            state['discuss']['repo_scope_open'] = source in active
+        render_reader.refresh()
+        aid = state['selected']
+        if not aid:
+            return
+        if source == 'archive':
+            await run.io_bound(intake_state.set_sources, aid, archive=source in active)
+        elif source == 'repo':
+            await run.io_bound(intake_state.set_sources, aid,
+                                repos=['homelab-infra'] if source in active else [])
+
+    def discuss_close_repo_scope():
+        state['discuss']['repo_scope_open'] = False
         render_reader.refresh()
 
     def discuss_select_model(model):
@@ -408,11 +680,13 @@ def build():
             return
         await run.io_bound(intake_state.clear_thread, aid)
         state['discuss']['thread'] = []
+        state['thread_counts'].pop(aid, None)
         render_reader.refresh()
+        render_articles.refresh()
 
-    def discuss_open_citation(aid):
+    async def discuss_open_citation(aid):
         state['reader_mode'] = 'read'
-        select_article(aid)
+        await select_article(aid)
 
     async def discuss_send(text):
         text = (text or '').strip()
@@ -425,8 +699,10 @@ def build():
         user_msg = {'role': 'user', 'text': text}
         state['discuss']['thread'].append(user_msg)
         await run.io_bound(intake_state.append_message, aid, user_msg)
+        state['thread_counts'][aid] = state['thread_counts'].get(aid, 0) + 1
         state['discuss']['busy'] = True
         render_reader.refresh()
+        render_articles.refresh()
 
         history = [{'role': 'model' if m['role'] == 'assistant' else 'user', 'text': m['text']}
                    for m in state['discuss']['thread'][:-1]]
@@ -446,7 +722,9 @@ def build():
                           'tools': result.get('tool_calls', []), 'cites': cites}
         state['discuss']['thread'].append(assistant_msg)
         await run.io_bound(intake_state.append_message, aid, assistant_msg)
+        state['thread_counts'][aid] = state['thread_counts'].get(aid, 0) + 1
         render_reader.refresh()
+        render_articles.refresh()
 
     # ---------- keyboard ----------
 
@@ -459,6 +737,7 @@ def build():
             return
         if key.escape:
             state['focused_id'] = None
+            state['confirming_ids'] = set()
             render_articles.refresh()
             return
 
@@ -466,17 +745,14 @@ def build():
         if not ids:
             return
         cur = state.get('focused_id')
-        idx = ids.index(cur) if cur in ids else -1
 
         if key == 'j' or key.is_cursorkey and key.code == 'ArrowDown':
-            state['focused_id'] = ids[min(idx + 1, len(ids) - 1)]
-            render_articles.refresh()
+            await move_focus(1)
         elif key == 'k' or key.is_cursorkey and key.code == 'ArrowUp':
-            state['focused_id'] = ids[max(idx - 1, 0)]
-            render_articles.refresh()
+            await move_focus(-1)
         elif key.enter:
             if cur:
-                select_article(cur)
+                await select_article(cur)
         elif key == 'x':
             if cur:
                 state['select_mode'] = True
@@ -487,13 +763,15 @@ def build():
         elif key == 'f':
             if cur:
                 await toggle_favorite(cur)
+        elif key == 'a':
+            if cur:
+                await toggle_archived(cur)
         elif key == 's':
             if cur:
                 await send_to_homelab(cur)
         elif key.backspace or key == 'Delete':
             if cur:
-                state['selected'] = cur
-                await delete_current()
+                request_delete(cur)
 
     ui.keyboard(on_key=on_key, ignore=['input', 'select', 'button', 'textarea'])
 
@@ -506,9 +784,9 @@ def build():
         state['articles'] = arts
         state['articles_loaded'] = True
         if client_alive():
-            render_folders.refresh()
-            render_my_folders.refresh()
-            render_tags.refresh()
+            render_folder_dropdown.refresh()
+            render_tag_dropdown.refresh()
+            render_header.refresh()
             render_articles.refresh()
 
     async def reload_queue():
@@ -518,279 +796,351 @@ def build():
         state['queue'] = q
         if client_alive():
             render_queue.refresh()
-            render_folders.refresh()
+            render_header.refresh()
 
     async def _initial_load():
         workflow = await run.io_bound(intake_state.all_article_states)
         folders = await run.io_bound(intake_state.list_folders)
         prefs = await run.io_bound(intake_state.get_prefs)
+        tcounts = await run.io_bound(intake_state.thread_counts)
         if workflow is not None:
             state['workflow'] = workflow
         if folders is not None:
             state['folders'] = folders
         if prefs is not None:
             state['prefs'] = prefs
+        if tcounts is not None:
+            state['thread_counts'] = tcounts
         await reload_articles()
         await reload_queue()
 
-    # ---------- rendering: rail ----------
+    # ---------- rendering: header ----------
 
     @ui.refreshable
-    def render_folders():
-        counts = folder_counts()
-        for key, icon, label in FOLDERS:
-            active = key == state['folder']
-            classes = 'nq-nav-item items-center no-wrap cursor-pointer' + (' nq-active' if active else '')
-            with ui.row().classes(classes).style(
-                    f'padding:7px 9px;border-radius:7px;font-size:12px;font-weight:500;gap:10px;width:100%;'
-                    f'color:{theme.TEXT if active else theme.TEXT_MUTED}'
-            ).on('click', lambda _, k=key: select_folder(k)):
-                ui.icon(icon).style('width:13px;font-size:11.5px')
-                ui.label(label).style('flex:1')
-                ui.label(str(counts[key])).style(f'font-size:10.5px;color:{theme.TEXT_DIM};font-weight:600')
+    def render_header():
+        arts = state['articles']
+        live_n = len([a for a in arts if not _wf(a['id'])['archived']])
+        unread_n = len([a for a in arts if not _wf(a['id'])['archived'] and not _wf(a['id'])['read']])
+        archived_n = len([a for a in arts if _wf(a['id'])['archived']])
+        queue_n = len([q for q in state['queue'] if q.get('status') in ('pending', 'processing', 'failed')])
+        # Two rows, not one -- the list column can be as narrow as 380px (when the
+        # reader is open), and title + full stats string + 4 buttons never fits on a
+        # single no-wrap row at that width (confirmed live: it was wrapping mid-word
+        # instead of laying out cleanly). Buttons are icon-only + tooltipped, same
+        # convention as the row-action icons, so they stay compact regardless of width.
+        with ui.column().style('width:100%;gap:4px;padding:14px 18px 0;min-width:0'):
+            with ui.row().classes('items-center no-wrap').style('width:100%;gap:8px;min-width:0'):
+                ui.label('Article Intake').style(
+                    f'font-size:16px;font-weight:700;color:{theme.TEXT};flex:none;white-space:nowrap')
+                ui.space()
+                for icon, tip, handler in [
+                    ('add_link', 'Add URL — not wired to a backend yet',
+                     lambda: ui.notify('Add URL — not wired to a backend yet', type='info')),
+                    ('play_arrow', 'Run intake — not wired to a backend yet',
+                     lambda: ui.notify('Run intake — not wired to a backend yet', type='info')),
+                    ('menu_book', 'Library — coming in a later phase',
+                     lambda: ui.notify('Library window — coming in a later phase', type='info')),
+                    ('question_mark', 'Keyboard shortcuts', lambda: _show_cheatsheet()),
+                ]:
+                    ui.button(icon=icon, on_click=handler).props('flat dense round').style(
+                        f'color:{theme.TEXT_MUTED};flex:none').tooltip(tip)
+            ui.label(
+                f"{live_n} article{'s' if live_n != 1 else ''} · {unread_n} unread · "
+                f"{archived_n} archived · queue {queue_n}"
+            ).style(f'font-size:11.5px;color:{theme.TEXT_DIM};width:100%')
+
+    # ---------- rendering: toolbar dropdowns ----------
 
     @ui.refreshable
-    def render_my_folders():
-        counts = my_folder_counts()
-        for name in state['folders']:
-            key = f'custom:{name}'
-            active = key == state['folder']
-            classes = 'nq-nav-item items-center no-wrap cursor-pointer' + (' nq-active' if active else '')
-            with ui.row().classes(classes).style(
-                    f'padding:7px 9px;border-radius:7px;font-size:12px;font-weight:500;gap:10px;width:100%;'
-                    f'color:{theme.TEXT if active else theme.TEXT_MUTED}'
-            ).on('click', lambda _, k=key: select_folder(k)):
-                ui.icon('fa-solid fa-folder').style(f'width:13px;font-size:10.5px;color:{theme.PURPLE}')
-                ui.label(name).style('flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap')
-                ui.label(str(counts.get(name, 0))).style(f'font-size:10.5px;color:{theme.TEXT_DIM};font-weight:600')
+    def render_folder_dropdown():
+        counts = status_counts()
+        custom_counts = custom_folder_counts()
+        active_key = state['folder']
+        if active_key.startswith('custom:'):
+            active_label = active_key[len('custom:'):]
+        else:
+            active_label = next((label for k, _, label in STATUS_ENTRIES if k == active_key), 'All')
 
-        active = state['folder'] == 'archived'
-        classes = 'nq-nav-item items-center no-wrap cursor-pointer' + (' nq-active' if active else '')
-        with ui.row().classes(classes).style(
-                f'padding:7px 9px;border-radius:7px;font-size:12px;font-weight:500;gap:10px;width:100%;'
-                f'color:{theme.TEXT if active else theme.TEXT_MUTED}'
-        ).on('click', lambda _, k='archived': select_folder(k)):
-            ui.icon('fa-solid fa-box-archive').style(f'width:13px;font-size:10.5px;color:{theme.PURPLE}')
-            ui.label('Archived').style('flex:1')
-            ui.label(str(archived_count())).style(f'font-size:10.5px;color:{theme.TEXT_DIM};font-weight:600')
+        with ui.row().classes('items-center no-wrap cursor-pointer').style(
+                f'gap:7px;height:32px;padding:0 11px;border-radius:8px;background:{theme.CARD_BG};'
+                f'border:1px solid rgba(255,255,255,0.09);color:{theme.TEXT};font-size:11.5px;font-weight:600'):
+            ui.icon('fa-solid fa-folder-open').style(f'font-size:10px;color:{theme.TEXT_MUTED}')
+            ui.label(active_label)
+            ui.icon('fa-solid fa-chevron-down').style(f'font-size:8px;color:{theme.TEXT_DIM}')
+            with ui.menu() as menu:
+                with ui.column().style('gap:1px;padding:6px;min-width:200px'):
+                    for key, icon, label in STATUS_ENTRIES:
+                        active = key == active_key
+                        with ui.row().classes('items-center no-wrap cursor-pointer').style(
+                                f'gap:8px;padding:7px 9px;border-radius:6px;width:100%;'
+                                f'background:{theme.ACCENT_TINT if active else "transparent"}'
+                        ).on('click', lambda _, k=key, m=menu: (select_folder(k), m.close())).mark(f'folder-{key}'):
+                            ui.icon(icon).style(
+                                f'font-size:11px;width:14px;color:{theme.ACCENT if active else theme.TEXT_MUTED}')
+                            ui.label(label).style(
+                                f'flex:1;font-size:12px;color:{theme.TEXT if active else theme.TEXT_MUTED}')
+                            ui.label(str(counts.get(key, 0))).style(f'font-size:10.5px;color:{theme.TEXT_DIM}')
+                    if state['folders']:
+                        ui.element('div').style('height:1px;background:rgba(255,255,255,0.06);margin:6px 2px')
+                        ui.label('MY FOLDERS').style(
+                            f'font-size:9px;font-weight:700;letter-spacing:0.5px;color:{theme.TEXT_DIM};'
+                            f'padding:4px 9px')
+                        for name in state['folders']:
+                            key = f'custom:{name}'
+                            active = key == active_key
+                            with ui.row().classes('items-center no-wrap cursor-pointer').style(
+                                    f'gap:8px;padding:7px 9px;border-radius:6px;width:100%;'
+                                    f'background:{theme.ACCENT_TINT if active else "transparent"}'
+                            ).on('click', lambda _, k=key, m=menu: (select_folder(k), m.close())):
+                                ui.icon('fa-solid fa-folder').style(
+                                    f'font-size:11px;width:14px;color:{theme.PURPLE if active else theme.TEXT_MUTED}')
+                                ui.label(name).style(
+                                    f'flex:1;font-size:12px;color:{theme.TEXT if active else theme.TEXT_MUTED};'
+                                    f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap')
+                                ui.label(str(custom_counts.get(name, 0))).style(
+                                    f'font-size:10.5px;color:{theme.TEXT_DIM}')
+                    ui.element('div').style('height:1px;background:rgba(255,255,255,0.06);margin:6px 2px')
+                    with ui.row().classes('items-center no-wrap cursor-pointer').style(
+                            f'gap:8px;padding:7px 9px;border-radius:6px;width:100%'
+                    ).on('click', lambda _, m=menu: (create_new_folder(), m.close())):
+                        ui.icon('fa-solid fa-plus').style(f'font-size:10px;color:{theme.ACCENT}')
+                        ui.label('New folder').style(f'font-size:12px;color:{theme.ACCENT}')
 
     @ui.refreshable
-    def render_tags():
+    def render_tag_dropdown():
+        tag_row_elements.clear()
         tags = available_tags()
         n_selected = len(state['tag_filters'])
-        with ui.row().classes('items-center no-wrap').style('width:100%;padding:0 2px'):
-            ui.label('TAGS').style(f'font-size:10px;font-weight:700;letter-spacing:0.4px;color:{theme.TEXT_DIM};flex:1')
-            if n_selected:
-                ui.label(f'clear {n_selected}').classes('cursor-pointer').style(
-                    f'font-size:9.5px;font-weight:600;color:{theme.ACCENT}').on('click', lambda: clear_tags())
-        with ui.row().style('align-items:center;gap:6px;background:#242435;border:1px solid rgba(255,255,255,0.07);'
-                             'border-radius:6px;padding:5px 8px;margin:6px 0;width:100%'):
-            ui.icon('fa-solid fa-magnifying-glass').style(f'font-size:9px;color:{theme.TEXT_DIM}')
-            ui.input(placeholder='Filter tags…', on_change=on_tag_search).props('borderless dense').style(
-                f'flex:1;color:{theme.TEXT};font-size:11px')
-        if not tags:
-            ui.label('No tags match.').style(f'font-size:11px;color:{theme.TEXT_DIM};padding:6px 2px')
-            return
-        with ui.column().classes('nq-custom-scroll').style('gap:1px;max-height:220px;overflow:auto;width:100%'):
-            for tag, count in tags:
-                active = tag in state['tag_filters']
-                with ui.row().classes('items-center no-wrap cursor-pointer').style(
-                        f'gap:8px;padding:5px 8px;border-radius:6px;'
-                        f'background:{theme.ACCENT_TINT if active else "transparent"}'
-                ).on('click', lambda _, t=tag: select_tag(t)):
-                    with ui.element('div').style(
-                            f'width:13px;height:13px;border-radius:3.5px;flex:none;'
-                            f'border:1.5px solid {theme.ACCENT if active else "rgba(255,255,255,0.2)"};'
-                            f'background:{theme.ACCENT if active else "transparent"};display:flex;'
-                            f'align-items:center;justify-content:center'):
-                        if active:
-                            ui.icon('fa-solid fa-check').style(f'font-size:7.5px;color:{theme.BG}')
-                    ui.label(tag).style(
-                        f'flex:1;font-size:11px;color:{theme.ACCENT if active else theme.TEXT_MUTED};'
-                        f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap')
-                    ui.label(str(count)).style(f'font-size:10px;color:{theme.TEXT_DIM}')
+        with ui.row().classes('items-center no-wrap cursor-pointer').style(
+                f'gap:7px;height:32px;padding:0 11px;border-radius:8px;'
+                f'background:{theme.ACCENT_TINT if n_selected else theme.CARD_BG};'
+                f'border:1px solid {"rgba(165,180,252,0.35)" if n_selected else "rgba(255,255,255,0.09)"};'
+                f'color:{theme.ACCENT if n_selected else theme.TEXT};font-size:11.5px;font-weight:600'):
+            ui.icon('fa-solid fa-tags').style(f'font-size:10px')
+            ui.label(f'Tags{f" ({n_selected})" if n_selected else ""}')
+            ui.icon('fa-solid fa-chevron-down').style('font-size:8px')
+            with ui.menu().props('persistent'):
+                with ui.column().style('gap:6px;padding:8px;min-width:220px'):
+                    with ui.row().classes('items-center no-wrap').style(
+                            'gap:6px;background:#242435;border:1px solid rgba(255,255,255,0.07);'
+                            'border-radius:6px;padding:5px 8px'):
+                        ui.icon('fa-solid fa-magnifying-glass').style(f'font-size:9px;color:{theme.TEXT_DIM}')
+                        ui.input(placeholder='Filter tags…', value=state['tag_search'],
+                                  on_change=on_tag_search).props('borderless dense').style(
+                            f'flex:1;color:{theme.TEXT};font-size:11px')
+                    if n_selected:
+                        ui.label(f'clear {n_selected}').classes('cursor-pointer').style(
+                            f'font-size:9.5px;font-weight:600;color:{theme.ACCENT}').on('click', lambda: clear_tags())
+                    if not tags:
+                        ui.label('No tags match.').style(f'font-size:11px;color:{theme.TEXT_DIM};padding:6px 2px')
+                    with ui.column().classes('nq-custom-scroll').style('gap:1px;max-height:260px;overflow:auto'):
+                        for tag, count in tags:
+                            active = tag in state['tag_filters']
+                            row = ui.row().classes('items-center no-wrap cursor-pointer').style(
+                                    f'gap:8px;padding:5px 8px;border-radius:6px;'
+                                    f'background:{theme.ACCENT_TINT if active else "transparent"}'
+                            ).on('click', lambda _, t=tag: select_tag(t))
+                            with row:
+                                ui.icon('fa-solid fa-check').style(
+                                    f'font-size:9px;color:{theme.ACCENT if active else "transparent"};width:12px')
+                                label = ui.label(tag).style(
+                                    f'flex:1;font-size:12px;color:{theme.ACCENT if active else theme.TEXT_MUTED};'
+                                    f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap')
+                                ui.label(str(count)).style(f'font-size:10px;color:{theme.TEXT_DIM}')
+                            tag_row_elements[tag] = (row, label)
 
     @ui.refreshable
-    def render_rail():
-        if not state['rail_open']:
-            with ui.column().style(
-                    f'width:42px;flex:none;border-right:1px solid {theme.BORDER};background:{theme.SIDEBAR_BG};'
-                    f'align-items:center;padding:14px 0;gap:14px'):
-                ui.icon('fa-solid fa-angles-right').classes('cursor-pointer').style(
-                    f'font-size:11px;color:{theme.TEXT_DIM}').on('click', lambda: toggle_rail())
-                for key, icon, _ in FOLDERS:
-                    ui.icon(icon).classes('cursor-pointer').style(
-                        f'font-size:12px;color:{theme.TEXT_MUTED}').on('click', lambda _, k=key: select_folder(k))
+    def render_filter_chips():
+        chips = []
+        if state['folder'] != 'all':
+            chips.append(('folder', 'fa-solid fa-folder', None))
+        for tag in sorted(state['tag_filters']):
+            chips.append(('tag', tag, tag))
+        if state['search']:
+            chips.append(('search', f'"{state["search"]}"', None))
+        if not chips:
             return
+        with ui.row().classes('items-center no-wrap').style('gap:6px;flex-wrap:wrap;width:100%'):
+            for kind, label, tag_value in chips:
+                with ui.row().classes('items-center no-wrap').style(
+                        f'gap:5px;padding:3px 4px 3px 9px;border-radius:12px;background:{theme.CARD_BG};'
+                        f'border:1px solid rgba(255,255,255,0.08)'):
+                    ui.label(label if kind != 'tag' else label).style(f'font-size:10.5px;color:{theme.TEXT_MUTED}')
+                    if kind == 'tag':
+                        ui.icon('fa-solid fa-xmark').classes('cursor-pointer').style(
+                            f'font-size:9px;color:{theme.TEXT_DIM};padding:2px').on(
+                            'click', lambda _, t=tag_value: select_tag(t))
+                    elif kind == 'folder':
+                        ui.icon('fa-solid fa-xmark').classes('cursor-pointer').style(
+                            f'font-size:9px;color:{theme.TEXT_DIM};padding:2px').on(
+                            'click', lambda: select_folder('all'))
+                    elif kind == 'search':
+                        ui.icon('fa-solid fa-xmark').classes('cursor-pointer').style(
+                            f'font-size:9px;color:{theme.TEXT_DIM};padding:2px').on(
+                            'click', lambda: clear_search())
+            ui.label('Clear all').classes('cursor-pointer').style(
+                f'font-size:10.5px;font-weight:600;color:{theme.ACCENT}').on('click', lambda: clear_all_filters())
 
-        with ui.column().style(
-                f'width:230px;flex:none;border-right:1px solid {theme.BORDER};background:{theme.SIDEBAR_BG};'
-                f'height:100%;gap:0'):
-            with ui.column().classes('nq-custom-scroll').style('flex:1;overflow:auto;padding:12px 10px;gap:0;width:100%'):
-                with ui.row().classes('items-center no-wrap').style('width:100%;padding:0 2px 6px'):
-                    ui.label('CATEGORIES').style(
-                        f'font-size:10px;font-weight:700;letter-spacing:0.4px;color:{theme.TEXT_DIM};flex:1')
-                    ui.icon('fa-solid fa-angles-left').classes('cursor-pointer').style(
-                        f'font-size:10px;color:{theme.TEXT_DIM}').on('click', lambda: toggle_rail())
-                render_folders()
-
-                ui.element('div').style('height:1px;background:rgba(255,255,255,0.06);margin:12px 2px')
-                with ui.row().classes('items-center no-wrap').style('width:100%;padding:0 2px 6px'):
-                    ui.label('MY FOLDERS').style(
-                        f'font-size:10px;font-weight:700;letter-spacing:0.4px;color:{theme.TEXT_DIM};flex:1')
-                    ui.icon('fa-solid fa-plus').classes('cursor-pointer').style(
-                        f'font-size:10px;color:{theme.ACCENT}').on('click', lambda: create_new_folder())
-                render_my_folders()
-
-                ui.element('div').style('height:1px;background:rgba(255,255,255,0.06);margin:12px 2px')
-                render_tags()
-
-    # ---------- rendering: toolbar ----------
-
-    @ui.refreshable
-    def render_bulk_bar():
-        if not state['select_mode'] or not state['selected_ids']:
-            return
-        n = len(state['selected_ids'])
-        with ui.row().classes('items-center no-wrap').style(
-                f'gap:10px;background:{theme.ACCENT_TINT};border:1px solid rgba(165,180,252,0.3);'
-                f'border-radius:9px;padding:8px 12px;width:100%'):
-            ui.label(f'{n} selected').style(f'font-size:12px;font-weight:600;color:{theme.ACCENT}')
-            ui.space()
-            ui.button('Mark read', on_click=lambda: bulk_mark(read=True)).props('flat dense').style(
-                f'font-size:11.5px;color:{theme.TEXT}')
-            ui.button('Mark unread', on_click=lambda: bulk_mark(read=False)).props('flat dense').style(
-                f'font-size:11.5px;color:{theme.TEXT}')
-            ui.button('Favorite', on_click=lambda: bulk_mark(favorite=True)).props('flat dense').style(
-                f'font-size:11.5px;color:{theme.AMBER}')
-            ui.button('Move to folder', on_click=lambda: bulk_move_to_folder()).props('flat dense').style(
-                f'font-size:11.5px;color:{theme.PURPLE}')
-            ui.button('Delete', on_click=lambda: bulk_delete()).props('flat dense').style(
-                f'font-size:11.5px;color:{theme.RED}')
-            ui.button('Clear', on_click=clear_selection).props('flat dense').style(
-                f'font-size:11.5px;color:{theme.TEXT_MUTED}')
-
-    @ui.refreshable
-    def render_toolbar_row2():
-        arts = filtered_articles()
-        n_unread = len([a for a in arts if not _wf(a['id'])['read']])
-        summary = f"{len(arts)} article{'s' if len(arts) != 1 else ''}"
-        if state['tag_filters']:
-            summary += f" · {len(state['tag_filters'])} tag filter{'s' if len(state['tag_filters']) != 1 else ''}"
-        summary += f" · {n_unread} unread"
-        with ui.row().classes('items-center no-wrap').style('width:100%'):
-            ui.label(summary).style(f'font-size:11px;color:{theme.TEXT_DIM};flex:1')
-            with ui.row().classes('items-center no-wrap').style('gap:6px'):
-                ui.checkbox(value=state['include_archived'], on_change=toggle_include_archived).props('dense')
-                ui.label('Include archived').style(f'font-size:11px;color:{theme.TEXT_MUTED}')
+    def clear_all_filters():
+        state['folder'] = 'all'
+        state['tag_filters'] = set()
+        state['search'] = ''
+        render_folder_dropdown.refresh()
+        render_tag_dropdown.refresh()
+        render_articles.refresh()
+        render_header.refresh()
+        render_filter_chips.refresh()
 
     def render_toolbar():
-        with ui.column().style(f'gap:8px;padding:10px 14px;border-bottom:1px solid {theme.BORDER};width:100%'):
-            with ui.row().classes('items-center no-wrap').style('gap:9px;width:100%'):
-                with ui.row().classes('items-center no-wrap').style(
-                        f'flex:1;min-width:0;gap:8px;background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.07);'
-                        f'border-radius:7px;padding:6px 10px'):
-                    ui.icon('fa-solid fa-magnifying-glass').style(f'font-size:11px;color:{theme.TEXT_DIM}')
-                    ui.input(placeholder='Search title, snippet, tags, full text…', on_change=on_search).props(
-                        'borderless dense').style(f'flex:1;color:{theme.TEXT};font-size:12px')
+        # Two rows, same reasoning as render_header(): folder dropdown + tag dropdown
+        # moved in from the old rail, so this toolbar now has more controls than fit
+        # on one no-wrap row at 380px (confirmed live -- density icons and the Select
+        # button were wrapping/overlapping unpredictably). Search gets its own full-
+        # width row; everything else goes on a second row that also wraps as a safety
+        # net if it's ever squeezed narrower than this.
+        with ui.column().style(f'gap:8px;padding:10px 14px;border-bottom:1px solid {theme.BORDER};'
+                                f'width:100%;min-width:0'):
+            with ui.row().classes('items-center no-wrap').style(
+                    f'width:100%;min-width:0;gap:8px;background:{theme.CARD_BG};'
+                    f'border:1px solid rgba(255,255,255,0.07);border-radius:7px;padding:6px 10px'):
+                ui.icon('fa-solid fa-magnifying-glass').style(f'font-size:11px;color:{theme.TEXT_DIM};flex:none')
+                ui_refs['search_input'] = ui.input(
+                    placeholder='Search title, snippet, tags, full text…', value=state['search'],
+                    on_change=on_search).props('borderless dense').style(
+                    f'flex:1;min-width:0;color:{theme.TEXT};font-size:12px')
+            with ui.row().classes('items-center').style('gap:9px;width:100%;flex-wrap:wrap'):
+                render_folder_dropdown()
+                render_tag_dropdown()
                 ui.select(options=dict(SORT_OPTIONS), value=state['prefs']['sort'],
                           on_change=lambda e: set_sort(e.value)).props('dense outlined').style('font-size:11.5px')
-                with ui.row().style(f'gap:2px;background:{theme.CARD_BG};border-radius:7px;padding:2px'):
-                    for key, icon in [('cards', 'fa-solid fa-grip'), ('table', 'fa-solid fa-table-list')]:
-                        active = state['prefs']['view'] == key
+                with ui.row().style(f'gap:2px;background:{theme.CARD_BG};border-radius:7px;padding:2px;flex:none'):
+                    for key, icon in [('cozy', 'fa-solid fa-grip-lines'), ('compact', 'fa-solid fa-bars')]:
+                        active = state['prefs']['density'] == key
                         with ui.element('div').classes('cursor-pointer').style(
                                 f'width:28px;height:28px;border-radius:5px;display:flex;align-items:center;'
                                 f'justify-content:center;background:{theme.ACCENT_TINT if active else "transparent"};'
                                 f'color:{theme.ACCENT if active else theme.TEXT_MUTED}'
-                        ).on('click', lambda _, k=key: set_view(k)):
+                        ).on('click', lambda _, k=key: set_density(k)).mark(f'density-toggle-{key}').tooltip(
+                                'Cozy — shows a snippet under each title' if key == 'cozy' else
+                                'Compact — titles only, more rows on screen'):
                             ui.icon(icon).style('font-size:12px')
                 select_btn_active = state['select_mode']
-                ui.button('Select', on_click=toggle_select_mode).props('dense outline' if not select_btn_active else 'dense').style(
-                    f'font-size:11.5px;'
+                ui.button('Select', on_click=toggle_select_mode).props(
+                    'dense outline' if not select_btn_active else 'dense').style(
+                    f'font-size:11.5px;flex:none;'
                     + (f'background:{theme.ACCENT};color:{theme.BG}' if select_btn_active else f'color:{theme.TEXT_MUTED}'))
-                ui.button(icon='question_mark', on_click=lambda: _show_cheatsheet()).props('flat dense round').style(
-                    f'color:{theme.TEXT_MUTED}')
-            render_toolbar_row2()
+            render_filter_chips()
             render_bulk_bar()
 
-    # ---------- rendering: article list (cards + table) ----------
+    # ---------- rendering: article list (density-aware rows) ----------
+
+    def _get_row_refreshable(aid):
+        """Lazily creates (and caches) a @ui.refreshable closure for one article's row.
+        Each call to ui.refreshable() on a distinct function object gets its own
+        independent refresh target, so calling .refresh() on this row's target later
+        only tears down and rebuilds that one row -- not render_articles()'s whole
+        list. Reads density/article content fresh on every call (including on
+        .refresh()), so it always reflects current state rather than whatever was
+        true when the closure was first created."""
+        target = row_refreshables.get(aid)
+        if target is None:
+            @ui.refreshable
+            def _row():
+                art = next((x for x in state['articles'] if x['id'] == aid), None)
+                if art is not None:
+                    _render_row(art, state['prefs']['density'] == 'compact')
+            target = _row
+            row_refreshables[aid] = target
+        return target
 
     @ui.refreshable
     def render_articles():
         if not state['articles_loaded']:
-            with ui.column().classes('items-center justify-center').style(
-                    f'padding:32px 12px;gap:10px;color:{theme.TEXT_DIM};width:100%'):
-                ui.spinner(size='lg')
-                ui.label('Loading articles…').style('font-size:12.5px')
+            with ui.column().classes('items-center justify-center').style('gap:10px;width:100%;padding:8px 0'):
+                for _ in range(6):
+                    ui.element('div').classes('nq-skel').style(
+                        f'height:52px;border-radius:9px;background:rgba(255,255,255,0.04);width:100%')
             return
 
         arts = filtered_articles()
         if not arts:
             if state['tag_filters']:
-                msg = f"No articles match all {len(state['tag_filters'])} selected tags."
+                msg = f"No articles carry all {len(state['tag_filters'])} selected tags."
             elif state['search']:
                 msg = f'No articles match "{state["search"]}"'
             else:
                 msg = 'No articles found.'
-            ui.label(msg).style(
-                f'padding:24px 12px;text-align:center;color:{theme.TEXT_DIM};font-size:12.5px;width:100%')
+            with ui.column().classes('items-center justify-center').style('width:100%;padding:24px 12px;gap:8px'):
+                ui.label(msg).style(f'text-align:center;color:{theme.TEXT_DIM};font-size:12.5px')
+                if state['tag_filters'] or state['search'] or state['folder'] != 'all':
+                    ui.label('Clear filters').classes('cursor-pointer').style(
+                        f'font-size:11.5px;font-weight:600;color:{theme.ACCENT}').on(
+                        'click', lambda: clear_all_filters())
             return
 
-        if state['prefs']['view'] == 'table':
-            _render_table(arts)
-        else:
-            _render_cards(arts)
-
-    def _render_cards(arts):
         for a in arts:
-            aid = a['id']
-            wf = _wf(aid)
-            badge_text, badge_color = _badge(a)
-            is_focused = state.get('focused_id') == aid
-            is_selected = aid in state['selected_ids']
-            title_color = theme.TEXT if not wf['read'] else theme.TEXT_MUTED
-            title_weight = 700 if not wf['read'] else 500
-            with ui.row().classes('no-wrap').style(
-                    f'padding:10px;border-radius:9px;gap:8px;width:100%;'
-                    f'background:{theme.ACCENT_TINT if is_focused else "transparent"};'
-                    f'border-left:2px solid {theme.ACCENT if not wf["read"] else "transparent"}'):
-                if state['select_mode']:
-                    with ui.element('div').classes('cursor-pointer').style(
-                            f'width:16px;height:16px;border-radius:4px;flex:none;margin-top:2px;'
-                            f'border:1.5px solid {theme.ACCENT if is_selected else "rgba(255,255,255,0.2)"};'
-                            f'background:{theme.ACCENT if is_selected else "transparent"};display:flex;'
-                            f'align-items:center;justify-content:center'
-                    ).on('click', lambda _, i=aid: toggle_row_selected(i)):
-                        if is_selected:
-                            ui.icon('fa-solid fa-check').style(f'font-size:9px;color:{theme.BG}')
+            _get_row_refreshable(a['id'])()
 
-                with ui.column().classes('cursor-pointer').style(
-                        'gap:5px;flex:1;min-width:0'
-                ).on('click', lambda _, i=aid: select_article(i)).mark(f'article-row-{aid}'):
-                    with ui.row().classes('items-center no-wrap').style('gap:8px;width:100%'):
+    def _render_row(a: dict, compact: bool):
+        aid = a['id']
+        wf = _wf(aid)
+        badge_text, badge_color = _badge(a)
+        is_focused = state.get('focused_id') == aid
+        is_selected = aid in state['selected_ids']
+        title_color = theme.TEXT if not wf['read'] else theme.TEXT_MUTED
+        title_weight = 700 if not wf['read'] else 500
+        with ui.row().classes('no-wrap items-center').style(
+                f'padding:{"6px 10px" if compact else "10px"};border-radius:9px;gap:8px;width:100%;'
+                f'background:{theme.ACCENT_TINT if is_focused else "transparent"};'
+                f'border-left:2px solid {theme.ACCENT if not wf["read"] else "transparent"}'):
+            if state['select_mode']:
+                with ui.element('div').classes('cursor-pointer').style(
+                        f'width:16px;height:16px;border-radius:4px;flex:none;margin-top:2px;'
+                        f'border:1.5px solid {theme.ACCENT if is_selected else "rgba(255,255,255,0.2)"};'
+                        f'background:{theme.ACCENT if is_selected else "transparent"};display:flex;'
+                        f'align-items:center;justify-content:center'
+                ).on('click', lambda _, i=aid: toggle_row_selected(i)):
+                    if is_selected:
+                        ui.icon('fa-solid fa-check').style(f'font-size:9px;color:{theme.BG}')
+
+            with ui.column().classes('cursor-pointer').style(
+                    'gap:4px;flex:1;min-width:0'
+            ).on('click', lambda _, i=aid: select_article(i)).mark(f'article-row-{aid}'):
+                with ui.row().classes('items-center no-wrap').style('gap:8px;width:100%'):
+                    if not compact:
                         ui.label(badge_text).style(
                             f'font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:10px;color:{badge_color};'
                             f'background:rgba(255,255,255,0.05)')
-                        if (a.get('priority_score') or 0) >= 7.5:
-                            with ui.row().classes('items-center no-wrap').style(f'gap:3px;color:{theme.AMBER}'):
-                                ui.icon('fa-solid fa-bolt').style('font-size:8px')
-                                ui.label(f"P{a['priority_score']}").style('font-size:9.5px;font-weight:700')
-                        if wf['favorite']:
-                            ui.icon('fa-solid fa-star').style(f'font-size:9px;color:{theme.AMBER}')
-                        ui.space()
-                        ui.label(f"{a.get('reading_minutes', 1)} min").style(f'font-size:10px;color:{theme.TEXT_DIM}')
-                        ui.label(a['date']).style(f'font-size:10.5px;color:{theme.TEXT_DIM}')
-                    ui.label(a['title']).style(
-                        f'font-size:13.5px;font-weight:{title_weight};color:{title_color};overflow:hidden;'
-                        f'text-overflow:ellipsis;white-space:nowrap;max-width:320px')
+                    if (a.get('priority_score') or 0) >= 7.5:
+                        with ui.row().classes('items-center no-wrap').style(f'gap:3px;color:{theme.AMBER}'):
+                            ui.icon('fa-solid fa-bolt').style('font-size:8px')
+                            ui.label(f"P{a['priority_score']}").style('font-size:9.5px;font-weight:700')
+                    if wf['favorite']:
+                        ui.icon('fa-solid fa-star').style(f'font-size:9px;color:{theme.AMBER}')
+                    if wf['archived']:
+                        ui.label('ARCHIVED').style(
+                            f'font-size:8.5px;font-weight:700;color:{theme.TEXT_DIM};'
+                            f'background:rgba(255,255,255,0.05);border-radius:8px;padding:1px 6px')
+                    n_msgs = state['thread_counts'].get(aid, 0)
+                    if n_msgs:
+                        with ui.row().classes('items-center no-wrap').style(f'gap:3px;color:{theme.TEXT_DIM}'):
+                            ui.icon('fa-regular fa-comment').style('font-size:9px')
+                            ui.label(str(n_msgs)).style('font-size:9.5px;font-weight:600')
+                    ui.space()
+                    ui.label(f"{a.get('reading_minutes', 1)} min").style(f'font-size:10px;color:{theme.TEXT_DIM}')
+                    ui.label(a['date']).style(f'font-size:10.5px;color:{theme.TEXT_DIM}')
+                ui.label(a['title']).style(
+                    f'font-size:13.5px;font-weight:{title_weight};color:{title_color};overflow:hidden;'
+                    f'text-overflow:ellipsis;white-space:nowrap;width:100%;display:block')
+                if not compact:
                     with ui.row().classes('items-center no-wrap').style('gap:6px'):
                         ui.icon('fa-solid fa-link').style(f'font-size:9px;color:{theme.TEXT_MUTED}')
                         ui.label(_short_url(a['source']) if a['source'] else 'Unknown source').style(
                             f'font-size:10.5px;color:{theme.TEXT_MUTED}')
                     if a['snippet']:
                         ui.label(a['snippet']).style(
-                            f'font-size:11.5px;color:{theme.ACCENT};opacity:0.85;max-width:320px;overflow:hidden;'
-                            f'text-overflow:ellipsis;white-space:nowrap')
+                            f'font-size:11.5px;color:{theme.ACCENT};opacity:0.85;width:100%;display:block;'
+                            f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap')
                     with ui.row().style('gap:4px;flex-wrap:wrap'):
                         for tag in a['tags'][:3]:
                             ui.label(tag).style(
@@ -801,86 +1151,92 @@ def build():
                                 f'font-size:9.5px;color:{theme.PURPLE};background:rgba(203,166,247,0.1);'
                                 f'border-radius:8px;padding:1px 7px')
 
-                with ui.column().style('gap:5px;align-items:center;flex:none;padding-top:2px'):
-                    for icon, key_hint, is_on, color, handler in [
-                        ('fa-solid fa-circle-check' if wf['read'] else 'fa-regular fa-circle', 'R',
-                         wf['read'], theme.GREEN, lambda _, i=aid: toggle_read(i)),
-                        ('fa-solid fa-star' if wf['favorite'] else 'fa-regular fa-star', 'F',
-                         wf['favorite'], theme.AMBER, lambda _, i=aid: toggle_favorite(i)),
-                        ('fa-solid fa-arrow-up-from-bracket', 'S', False, theme.PURPLE,
-                         lambda _, i=aid: send_to_homelab(i)),
-                        ('fa-solid fa-trash', 'D', False, theme.RED, lambda _, i=aid: _delete_row(i)),
-                    ]:
-                        with ui.row().classes('items-center no-wrap cursor-pointer').style('gap:4px').on(
-                                'click', handler):
-                            ui.icon(icon).style(f'font-size:12px;color:{color if is_on else theme.TEXT_DIM}')
-                            ui.label(key_hint).style(
-                                f'font-family:"JetBrains Mono",monospace;font-size:8px;color:{theme.TEXT_DIM}')
+            _render_row_actions(aid, wf)
 
-    def _render_table(arts):
-        with ui.row().classes('items-center no-wrap').style(
-                f'padding:6px 10px;border-bottom:1px solid {theme.BORDER};width:100%;gap:8px'):
-            if state['select_mode']:
-                ui.element('div').style('width:16px;flex:none')
-            for label, sort_key, width in [('TITLE', 'title', 'flex:1'), ('DATE', 'date', 'width:70px'),
-                                            ('PRIORITY', 'priority', 'width:60px'), ('TIME', None, 'width:50px'),
-                                            ('TAGS', None, 'width:120px'), ('', None, 'width:100px')]:
-                active = state['prefs']['sort'] == sort_key
-                style = f'font-size:9.5px;font-weight:700;letter-spacing:0.3px;color:{theme.ACCENT if active else theme.TEXT_DIM};{width}'
-                if sort_key:
-                    ui.label(label).classes('cursor-pointer').style(style).on('click', lambda _, k=sort_key: set_sort(k))
-                else:
-                    ui.label(label).style(style)
-
-        for a in arts:
-            aid = a['id']
-            wf = _wf(aid)
-            is_focused = state.get('focused_id') == aid
-            is_selected = aid in state['selected_ids']
-            with ui.row().classes('items-center no-wrap').style(
-                    f'padding:7px 10px;border-radius:6px;width:100%;gap:8px;'
-                    f'background:{theme.ACCENT_TINT if is_focused else "transparent"}'):
-                if state['select_mode']:
-                    with ui.element('div').classes('cursor-pointer').style(
-                            f'width:14px;height:14px;border-radius:4px;flex:none;'
-                            f'border:1.5px solid {theme.ACCENT if is_selected else "rgba(255,255,255,0.2)"};'
-                            f'background:{theme.ACCENT if is_selected else "transparent"}'
-                    ).on('click', lambda _, i=aid: toggle_row_selected(i)):
-                        pass
-                with ui.row().classes('items-center no-wrap cursor-pointer').style(
-                        'flex:1;min-width:0;gap:6px'
-                ).on('click', lambda _, i=aid: select_article(i)).mark(f'article-row-{aid}'):
-                    if not wf['read']:
-                        ui.element('div').style(f'width:6px;height:6px;border-radius:50%;background:{theme.ACCENT};flex:none')
-                    ui.label(a['title']).style(
-                        f'font-size:12.5px;font-weight:{600 if not wf["read"] else 400};'
-                        f'color:{theme.TEXT if not wf["read"] else theme.TEXT_MUTED};overflow:hidden;'
-                        f'text-overflow:ellipsis;white-space:nowrap')
-                    if wf['favorite']:
-                        ui.icon('fa-solid fa-star').style(f'font-size:9px;color:{theme.AMBER};flex:none')
-                ui.label(a['date']).style(f'font-size:10.5px;color:{theme.TEXT_DIM};width:70px')
-                ui.label(str(a.get('priority_score') or '-')).style(f'font-size:10.5px;color:{theme.TEXT_DIM};width:60px')
-                ui.label(f"{a.get('reading_minutes', 1)}m").style(f'font-size:10.5px;color:{theme.TEXT_DIM};width:50px')
-                with ui.row().style('width:120px;gap:3px;overflow:hidden'):
-                    for tag in a['tags'][:2]:
-                        ui.label(tag).style(
-                            f'font-size:9px;color:{theme.TEXT_MUTED};background:rgba(255,255,255,0.05);'
-                            f'border-radius:6px;padding:1px 5px')
-                with ui.row().style('width:100px;gap:6px'):
-                    ui.icon('fa-solid fa-arrow-up-from-bracket').classes('cursor-pointer').style(
-                        f'font-size:11px;color:{theme.PURPLE}').on('click', lambda _, i=aid: send_to_homelab(i))
-                    ui.icon('fa-solid fa-trash').classes('cursor-pointer').style(
-                        f'font-size:11px;color:{theme.RED}').on('click', lambda _, i=aid: _delete_row(i))
-
-    async def _delete_row(aid):
-        if not await confirm('Delete article?', 'Permanently delete this article?',
-                              confirm_label='Delete', danger=True):
+    def _render_row_actions(aid: str, wf: dict):
+        if aid in state['confirming_ids']:
+            with ui.row().classes('items-center no-wrap').style('gap:6px;flex:none;width:178px;justify-content:flex-end'):
+                ui.label('Delete?').style(f'font-size:11.5px;color:{theme.RED};font-weight:600')
+                ui.button('Yes', on_click=lambda: confirm_delete(aid)).props('flat dense').style(
+                    f'color:{theme.RED};font-size:11px;min-width:0;padding:2px 8px')
+                ui.button('No', on_click=lambda: cancel_delete(aid)).props('flat dense').style(
+                    f'color:{theme.TEXT_MUTED};font-size:11px;min-width:0;padding:2px 8px')
             return
-        await run.io_bound(intake.delete_article, aid)
-        if state['selected'] == aid:
-            state['selected'] = None
-            render_reader.refresh()
-        await reload_articles()
+
+        with ui.row().classes('items-center no-wrap').style('gap:2px;flex:none;width:178px;justify-content:flex-end'):
+            for icon, tip, is_on, color, handler, mark_name in [
+                ('fa-solid fa-circle-check' if wf['read'] else 'fa-regular fa-circle', 'Read/unread',
+                 wf['read'], theme.GREEN, lambda _, i=aid: toggle_read(i), 'r'),
+                ('fa-solid fa-star' if wf['favorite'] else 'fa-regular fa-star', 'Favorite',
+                 wf['favorite'], theme.AMBER, lambda _, i=aid: toggle_favorite(i), 'f'),
+                ('fa-solid fa-box-archive', 'Archive/unarchive', wf['archived'], theme.ACCENT,
+                 lambda _, i=aid: toggle_archived(i), 'a'),
+            ]:
+                with ui.element('div').classes('cursor-pointer').style(
+                        'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
+                        'justify-content:center'
+                ).on('click', handler).mark(f'row-{mark_name}-{aid}').tooltip(tip):
+                    ui.icon(icon).style(f'font-size:12.5px;color:{color if is_on else theme.TEXT_DIM}')
+
+            if aid in state['sending_ids']:
+                with ui.element('div').style(
+                        'width:28px;height:28px;display:flex;align-items:center;justify-content:center'
+                ).mark(f'sending-{aid}'):
+                    ui.spinner(size='xs').style(f'color:{theme.PURPLE}')
+            else:
+                with ui.element('div').classes('cursor-pointer').style(
+                        'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center'
+                ).on('click', lambda _, i=aid: send_to_homelab(i)).mark(f'send-icon-{aid}').tooltip('Send to HomeLab'):
+                    ui.icon('fa-solid fa-arrow-up-from-bracket').style(f'font-size:12.5px;color:{theme.PURPLE}')
+
+            with ui.element('div').classes('cursor-pointer').style(
+                    'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center'
+            ).on('click', lambda _, i=aid: request_delete(i)).mark(f'delete-icon-{aid}').tooltip('Delete'):
+                ui.icon('fa-solid fa-trash').style(f'font-size:12.5px;color:{theme.RED}')
+
+            with ui.element('div').classes('cursor-pointer').style(
+                    'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center'
+            ).tooltip('More actions'):
+                ui.icon('fa-solid fa-ellipsis').style(f'font-size:13px;color:{theme.TEXT_DIM}')
+                with ui.menu():
+                    art = next((x for x in state['articles'] if x['id'] == aid), None)
+                    if art and art.get('source'):
+                        ui.menu_item('Open original', on_click=lambda u=art['source']: ui.navigate.to(u, new_tab=True))
+                    ui.menu_item('Discuss with AI', on_click=lambda i=aid: open_discuss(i))
+                    ui.menu_item('Move to folder', on_click=lambda i=aid: move_article_to_folder(i))
+                    ui.menu_item(
+                        'Clear duplicate flag' if art and art.get('is_duplicate') else 'Flag as duplicate',
+                        on_click=lambda i=aid: mark_duplicate_row(i))
+                    ui.menu_item('Resubmit', on_click=lambda i=aid: resubmit_row(i))
+
+    # ---------- rendering: bulk bar ----------
+
+    @ui.refreshable
+    def render_bulk_bar():
+        if not state['select_mode'] or not state['selected_ids']:
+            return
+        n = len(state['selected_ids'])
+        with ui.row().classes('items-center no-wrap').style(
+                f'gap:10px;background:{theme.ACCENT_TINT};border:1px solid rgba(165,180,252,0.3);'
+                f'border-radius:9px;padding:8px 12px;width:100%;flex-wrap:wrap'):
+            ui.label(f'{n} selected').style(f'font-size:12px;font-weight:600;color:{theme.ACCENT}')
+            ui.space()
+            ui.button('Mark read', on_click=lambda: bulk_mark(read=True)).props('flat dense').style(
+                f'font-size:11.5px;color:{theme.TEXT}')
+            ui.button('Mark unread', on_click=lambda: bulk_mark(read=False)).props('flat dense').style(
+                f'font-size:11.5px;color:{theme.TEXT}')
+            ui.button('Favorite', on_click=lambda: bulk_mark(favorite=True)).props('flat dense').style(
+                f'font-size:11.5px;color:{theme.AMBER}')
+            ui.button('Archive', on_click=lambda: bulk_mark(archived=True)).props('flat dense').style(
+                f'font-size:11.5px;color:{theme.ACCENT}')
+            ui.button('Unarchive', on_click=lambda: bulk_mark(archived=False)).props('flat dense').style(
+                f'font-size:11.5px;color:{theme.ACCENT}')
+            ui.button('Move to folder', on_click=lambda: bulk_move_to_folder()).props('flat dense').style(
+                f'font-size:11.5px;color:{theme.PURPLE}')
+            ui.button('Delete', on_click=lambda: bulk_delete()).props('flat dense').style(
+                f'font-size:11.5px;color:{theme.RED}')
+            ui.button('Clear', on_click=clear_selection).props('flat dense').style(
+                f'font-size:11.5px;color:{theme.TEXT_MUTED}')
 
     # ---------- rendering: queue ----------
 
@@ -889,8 +1245,11 @@ def build():
         failed = [q for q in state['queue'] if q.get('status') == 'failed']
         active = [q for q in state['queue'] if q.get('status') in ('pending', 'processing')]
         if failed:
-            ui.label('FAILED · CLICK TO RETRY').style(
-                f'font-size:10.5px;font-weight:700;color:{theme.RED};margin:2px 4px 6px')
+            with ui.row().classes('items-center no-wrap').style('width:100%;padding:2px 4px 6px'):
+                ui.label('FAILED · CLICK TO RETRY').style(
+                    f'font-size:10.5px;font-weight:700;color:{theme.RED};flex:1')
+                ui.label('Retry all').classes('cursor-pointer').style(
+                    f'font-size:10px;font-weight:600;color:{theme.RED}').on('click', lambda: retry_all_failed())
             for item in failed:
                 with ui.column().classes('cursor-pointer').style(
                         'padding:10px;border-radius:9px;margin-bottom:6px;background:rgba(243,139,168,0.07);'
@@ -919,25 +1278,128 @@ def build():
         await run.io_bound(intake.retry_queue_item, item_id)
         await reload_queue()
 
+    async def retry_all_failed():
+        for item in [q for q in state['queue'] if q.get('status') == 'failed']:
+            await run.io_bound(intake.retry_queue_item, item['id'])
+        await reload_queue()
+
     # ---------- rendering: reader ----------
+
+    def _reader_content_block(art: dict, data: dict | None, show_actions: bool):
+        """Shared between plain Read mode and Discuss mode's left-hand article pane --
+        badge/meta/title/why-it-matters/body, with the action row only in plain Read
+        mode (Discuss mode's left pane is read-only prose alongside the chat)."""
+        if data is None:
+            ui.spinner(size='lg')
+            return
+        badge_text, badge_color = _badge(art)
+        with ui.row().classes('items-center no-wrap').style('gap:10px;margin-bottom:8px;flex-wrap:wrap'):
+            ui.label(badge_text).style(
+                f'font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:10px;color:{badge_color}')
+            if art.get('content_type'):
+                ui.label(art['content_type']).style(
+                    f'font-size:11px;color:{theme.TEXT_MUTED};background:rgba(255,255,255,0.05);'
+                    f'border-radius:6px;padding:2px 8px')
+            domain_line = ' · '.join(p for p in [art.get('primary_domain'), art['date']] if p)
+            if domain_line:
+                ui.label(domain_line).style(f'font-size:12px;color:{theme.TEXT_DIM}')
+            ui.label(f"{art.get('reading_minutes', 1)} min read").style(f'font-size:12px;color:{theme.TEXT_DIM}')
+        ui.label(art['title']).style(f'font-size:20px;font-weight:700;margin-bottom:10px;color:{theme.TEXT}')
+
+        if show_actions:
+            aid = art['id']
+            wf = _wf(aid)
+            if aid in state['confirming_ids']:
+                with ui.row().classes('items-center no-wrap').style('gap:8px;margin-bottom:14px'):
+                    ui.label('Delete this article?').style(f'font-size:12.5px;color:{theme.RED};font-weight:600')
+                    ui.button('Yes, delete', on_click=lambda: confirm_delete(aid)).props('dense').style(
+                        f'background:{theme.RED};color:{theme.BG};font-size:11.5px')
+                    ui.button('Cancel', on_click=lambda: cancel_delete(aid)).props('flat dense').style(
+                        f'color:{theme.TEXT_MUTED};font-size:11.5px')
+            else:
+                is_sending = aid in state['sending_ids']
+                with ui.row().style('gap:8px;flex-wrap:wrap;margin-bottom:14px'):
+                    ui.button('Discuss', icon='forum', on_click=lambda: open_discuss(aid)).props('outline').style(
+                        f'color:{theme.ACCENT}')
+                    if art.get('source'):
+                        ui.button('Open original', icon='open_in_new', on_click=lambda u=art['source']: ui.navigate.to(
+                            u, new_tab=True)).props('outline').style(f'color:{theme.TEXT_MUTED}')
+                    ui.button('Favorite' if not wf['favorite'] else 'Unfavorite', icon='star',
+                              on_click=lambda: toggle_favorite(aid)).props('outline').style(f'color:{theme.AMBER}')
+                    ui.button('Sending…' if is_sending else 'Send to HomeLab', icon='send',
+                              on_click=lambda: send_to_homelab(aid)).props(
+                        'outline loading disable' if is_sending else 'outline').style(f'color:{theme.PURPLE}')
+                    ui.button('Unarchive' if wf['archived'] else 'Archive', icon='inventory_2',
+                              on_click=lambda: toggle_archived(aid)).props('outline').style(f'color:{theme.ACCENT}')
+                    ui.button('Clear duplicate' if art.get('is_duplicate') else 'Flag duplicate',
+                              icon='content_copy', on_click=lambda: mark_duplicate_row(aid)).props(
+                        'outline').style(f'color:{theme.TEXT_MUTED}')
+                    ui.button('Resubmit', icon='refresh', on_click=lambda: resubmit_row(aid)).props(
+                        'outline').style(f'color:{theme.ACCENT}')
+                    ui.button('Delete', icon='delete', on_click=lambda: request_delete(aid)).props(
+                        'outline').style(f'color:{theme.RED}')
+
+        if art.get('why_it_matters'):
+            with ui.column().style(
+                    'background:rgba(249,201,124,0.08);border:1px solid rgba(249,201,124,0.22);'
+                    'border-radius:10px;padding:12px 14px;margin-bottom:16px;gap:6px;max-width:640px'):
+                with ui.row().classes('items-center no-wrap').style(f'gap:7px;color:{theme.AMBER}'):
+                    ui.icon('fa-solid fa-bolt').style('font-size:11px')
+                    ui.label(f"WHY IT MATTERS · PRIORITY {art.get('priority_score')}").style(
+                        'font-size:10.5px;font-weight:700;letter-spacing:0.3px')
+                ui.label(art['why_it_matters']).style('font-size:12.5px;line-height:1.5;color:#cdd1e0')
+
+        with ui.row().style(f'gap:4px;background:{theme.CARD_BG};border-radius:8px;padding:3px;'
+                             f'width:fit-content;margin-bottom:16px'):
+            for key, label in [('content', 'Content'), ('summary', 'AI Summary')]:
+                active = state['reader_tab'] == key
+                with ui.row().classes('cursor-pointer').style(
+                        f'padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;'
+                        f'background:{theme.ACCENT if active else "transparent"};'
+                        f'color:{theme.BG if active else theme.TEXT_MUTED}'
+                ).on('click', lambda _, k=key: set_reader_tab(k)):
+                    ui.label(label)
+
+        if state['reader_tab'] == 'content':
+            ui.markdown(data['content']).classes('nq-markdown').style('margin-bottom:20px')
+        else:
+            ui.markdown(data.get('summary') or 'No AI summary available.').classes('nq-markdown').style(
+                f'background:{theme.CARD_BG};border-radius:10px;padding:14px 16px;margin-bottom:20px')
 
     @ui.refreshable
     def render_reader():
         aid = state.get('selected')
         if not aid:
-            with ui.column().classes('items-center justify-center').style(
-                    f'height:100%;width:100%;gap:12px;color:{theme.TEXT_DISABLED}'):
-                ui.icon('fa-solid fa-book-open').style('font-size:28px')
-                ui.label('Select an article to read').style('font-size:13.5px;font-weight:500')
             return
         art = next((a for a in state['articles'] if a['id'] == aid), None)
         if not art:
             return
         data = state.get('article_content')
+        ids = [a['id'] for a in filtered_articles()]
+        position = f"{ids.index(aid) + 1} of {len(ids)}" if aid in ids else None
 
         with ui.column().style('height:100%;width:100%;gap:0'):
             with ui.row().classes('items-center no-wrap').style(
-                    f'padding:12px 20px;border-bottom:1px solid {theme.BORDER};gap:14px;width:100%'):
+                    f'padding:10px 16px;border-bottom:1px solid {theme.BORDER};gap:10px;width:100%'):
+                if state['reader_size'] == 'full':
+                    # Full width hides the article list entirely, which is the most
+                    # disorienting of the three sizes -- give the way back a visible
+                    # text label, not just a small icon, so it's easy to find (live
+                    # testing showed the icon-only version was easy to miss entirely).
+                    with ui.row().classes('items-center no-wrap cursor-pointer').style(
+                            f'gap:5px').on('click', lambda: reset_reader_size()):
+                        ui.icon('fa-solid fa-compress').style(f'font-size:11px;color:{theme.ACCENT}')
+                        ui.label('Show list').style(f'font-size:11.5px;font-weight:600;color:{theme.ACCENT}')
+                elif state['reader_size'] == 'wide':
+                    ui.icon('fa-solid fa-compress').classes('cursor-pointer').style(
+                        f'font-size:11px;color:{theme.TEXT_DIM}').on('click', lambda: reset_reader_size()).tooltip(
+                        'Back to normal width')
+                    ui.label('Full width').classes('cursor-pointer').style(
+                        f'font-size:10.5px;color:{theme.TEXT_DIM}').on('click', lambda: cycle_reader_wider())
+                else:
+                    ui.icon('fa-solid fa-expand').classes('cursor-pointer').style(
+                        f'font-size:11px;color:{theme.TEXT_DIM}').on('click', lambda: cycle_reader_wider()).tooltip(
+                        'Wider')
                 with ui.row().style(f'gap:3px;background:{theme.CARD_BG};border-radius:8px;padding:3px'):
                     for key, label in [('read', 'Read'), ('discuss', 'Discuss')]:
                         active = state['reader_mode'] == key
@@ -952,92 +1414,76 @@ def build():
                                     f'font-size:9px;font-weight:700;background:rgba(0,0,0,0.2);'
                                     f'border-radius:8px;padding:0 5px')
                 ui.space()
-                if art.get('source'):
-                    with ui.row().classes('items-center no-wrap cursor-pointer').style(
-                            'gap:6px;flex:none;white-space:nowrap'
-                    ).on('click', lambda: ui.navigate.to(art['source'], new_tab=True)):
-                        ui.icon('fa-solid fa-arrow-up-right-from-square').style(f'font-size:10px;color:{theme.ACCENT}')
-                        ui.label('Open original').style(f'font-size:11.5px;font-weight:600;color:{theme.ACCENT}')
-                        ui.label(_short_url(art['source'])).style(
-                            f'font-family:"JetBrains Mono",monospace;font-size:10px;color:{theme.TEXT_DIM}')
+                if position:
+                    ui.label(position).style(f'font-size:11px;color:{theme.TEXT_DIM}')
+                ui.icon('fa-solid fa-chevron-up').classes('cursor-pointer').style(
+                    f'font-size:11px;color:{theme.TEXT_DIM}').on('click', lambda: move_focus(-1)).tooltip('Previous (k)')
+                ui.icon('fa-solid fa-chevron-down').classes('cursor-pointer').style(
+                    f'font-size:11px;color:{theme.TEXT_DIM}').on('click', lambda: move_focus(1)).tooltip('Next (j)')
+                ui.icon('fa-solid fa-xmark').classes('cursor-pointer').style(
+                    f'font-size:13px;color:{theme.TEXT_DIM}').on('click', lambda: close_reader()).tooltip('Close')
 
             if state['reader_mode'] == 'discuss':
-                discuss_panel.build(
-                    art, state['discuss'], on_send=lambda t: discuss_send(t),
-                    on_toggle_source=discuss_toggle_source, on_select_model=discuss_select_model,
-                    on_clear_thread=lambda: discuss_clear_thread(), on_open_citation=discuss_open_citation,
-                )
+                with ui.row().style('flex:1;min-height:0;width:100%;gap:0'):
+                    with ui.column().classes('nq-custom-scroll').style(
+                            'flex:1;overflow:auto;padding:18px 24px;min-width:0'):
+                        _reader_content_block(art, data, show_actions=False)
+                    with ui.column().style(f'width:520px;flex:none;border-left:1px solid {theme.BORDER};height:100%'):
+                        discuss_panel.build(
+                            art, state['discuss'], on_send=lambda t: discuss_send(t),
+                            on_toggle_source=lambda s: discuss_toggle_source(s),
+                            on_select_model=discuss_select_model,
+                            on_clear_thread=lambda: discuss_clear_thread(), on_open_citation=discuss_open_citation,
+                            on_close_repo_scope=discuss_close_repo_scope,
+                        )
                 return
 
             with ui.column().classes('nq-custom-scroll').style('flex:1;overflow:auto;padding:20px 28px;min-width:0'):
-                if data is None:
-                    ui.spinner(size='lg')
-                    return
-                badge_text, badge_color = _badge(art)
-                with ui.row().classes('items-center no-wrap').style('gap:10px;margin-bottom:8px;flex-wrap:wrap'):
-                    ui.label(badge_text).style(
-                        f'font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:10px;color:{badge_color}')
-                    if art.get('content_type'):
-                        ui.label(art['content_type']).style(
-                            f'font-size:11px;color:{theme.TEXT_MUTED};background:rgba(255,255,255,0.05);'
-                            f'border-radius:6px;padding:2px 8px')
-                    domain_line = ' · '.join(p for p in [art.get('primary_domain'), art['date']] if p)
-                    if domain_line:
-                        ui.label(domain_line).style(f'font-size:12px;color:{theme.TEXT_DIM}')
-                    ui.label(f"{art.get('reading_minutes', 1)} min read").style(f'font-size:12px;color:{theme.TEXT_DIM}')
-                ui.label(art['title']).style(f'font-size:21px;font-weight:700;margin-bottom:12px;color:{theme.TEXT}')
-
-                if art.get('why_it_matters'):
-                    with ui.column().style(
-                            'background:rgba(249,201,124,0.08);border:1px solid rgba(249,201,124,0.22);'
-                            'border-radius:10px;padding:12px 14px;margin-bottom:16px;gap:6px;max-width:500px'):
-                        with ui.row().classes('items-center no-wrap').style(f'gap:7px;color:{theme.AMBER}'):
-                            ui.icon('fa-solid fa-bolt').style('font-size:11px')
-                            ui.label(f"WHY IT MATTERS · PRIORITY {art.get('priority_score')}").style(
-                                'font-size:10.5px;font-weight:700;letter-spacing:0.3px')
-                        ui.label(art['why_it_matters']).style('font-size:12.5px;line-height:1.5;color:#cdd1e0')
-
-                with ui.row().style(f'gap:4px;background:{theme.CARD_BG};border-radius:8px;padding:3px;'
-                                     f'width:fit-content;margin-bottom:16px'):
-                    for key, label in [('content', 'Content'), ('summary', 'AI Summary')]:
-                        active = state['reader_tab'] == key
-                        with ui.row().classes('cursor-pointer').style(
-                                f'padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;'
-                                f'background:{theme.ACCENT if active else "transparent"};'
-                                f'color:{theme.BG if active else theme.TEXT_MUTED}'
-                        ).on('click', lambda _, k=key: set_reader_tab(k)):
-                            ui.label(label)
-
-                if state['reader_tab'] == 'content':
-                    ui.markdown(data['content']).classes('nq-markdown').style('margin-bottom:20px')
-                else:
-                    ui.markdown(data.get('summary') or 'No AI summary available.').classes('nq-markdown').style(
-                        f'background:{theme.CARD_BG};border-radius:10px;padding:14px 16px;margin-bottom:20px')
-
-                with ui.row().style('gap:10px;flex-wrap:wrap'):
-                    ui.button('Delete', icon='delete', on_click=delete_current).props('outline').style(
-                        f'color:{theme.RED}')
-                    ui.button('Toggle Duplicate', icon='content_copy', on_click=mark_dup_current).props(
-                        'outline').style(f'color:{theme.TEXT_MUTED}')
-                    ui.button('Resubmit', icon='refresh', on_click=resubmit_current).props('outline').style(
-                        f'color:{theme.ACCENT}')
-                    ui.button('Send to HomeLab', icon='send', on_click=lambda: send_to_homelab(aid)).props(
-                        'outline').style(f'color:{theme.PURPLE}')
+                _reader_content_block(art, data, show_actions=True)
 
     # ---------- layout ----------
+    #
+    # list_col/reader_col are created ONCE, outside any @ui.refreshable -- opening,
+    # closing, or resizing the reader only ever calls update_layout(), which adjusts
+    # these two columns' own width/visibility in place. Nothing here tears down or
+    # recreates the list (or its scroll container), so scroll position survives every
+    # article click; only render_articles()/render_reader() (each independently
+    # refreshable) replace their own contents when the underlying data actually
+    # changes. An earlier version refreshed one big wrapper around everything
+    # (header/toolbar/list/reader) on every reader open/close/resize -- correct, but
+    # needlessly rebuilt the whole list (and its scroll position) just to show a
+    # reader pane; this version keeps the perf/UX property without changing behavior.
+
+    _LIST_BASE_STYLE = f'border-right:1px solid {theme.BORDER};height:100%;gap:0;min-width:0'
+    _READER_BASE_STYLE = 'height:100%;min-width:0'
 
     with ui.row().style('flex:1;height:100%;min-height:0;gap:0;width:100%'):
-        render_rail()
-
-        with ui.column().style(
-                f'width:380px;flex:none;border-right:1px solid {theme.BORDER};height:100%;gap:0'):
+        list_col = ui.column().style(f'flex:1;{_LIST_BASE_STYLE}')
+        with list_col:
+            render_header()
             render_toolbar()
-            with ui.column().classes('nq-custom-scroll').style('flex:1;overflow:auto;padding:8px 10px;gap:2px;width:100%'):
+            with ui.column().classes('nq-custom-scroll').style(
+                    'flex:1;overflow:auto;padding:8px 10px;gap:2px;width:100%'):
                 render_queue()
                 render_articles()
 
-        with ui.column().style('flex:1;height:100%;min-width:0'):
+        reader_col = ui.column().style(f'width:560px;flex:none;{_READER_BASE_STYLE}')
+        with reader_col:
             render_reader()
+        reader_col.set_visibility(False)
+
+    def update_layout():
+        reader_open = bool(state.get('selected'))
+        reader_full = reader_open and state['reader_size'] == 'full'
+        reader_width = {'normal': '560px', 'wide': '860px'}.get(state['reader_size'], '560px')
+
+        list_col.set_visibility(not reader_full)
+        list_col.style(replace=f'{"flex:1" if not reader_open else "width:380px;flex:none"};{_LIST_BASE_STYLE}')
+
+        reader_col.set_visibility(reader_open)
+        if reader_open:
+            reader_col.style(replace=f'{"flex:1" if reader_full else f"width:{reader_width};flex:none"};'
+                                       f'{_READER_BASE_STYLE}')
 
     def get_context_summary():
         folder_desc = f"folder='{state['folder']}'"
@@ -1067,5 +1513,7 @@ def build():
 
     ai_context.register('intake', get_context_summary)
     ai_context.register_card('intake', get_context_card)
+
+    live_state.register('intake', lambda: ui.timer(0.01, reload_workflow, once=True))
 
     ui.timer(0.05, _initial_load, once=True)

@@ -28,6 +28,7 @@ components/
   layout.py                    per-client shell: nav + tab_panels + chat sidebar; owns tab-switch logic
   nav_sidebar.py                left nav (NAV_ITEMS / DISABLED_ITEMS / QUICK_LINKS constants)
   chat_sidebar.py               AI Assistant panel UI + send() handler
+  discuss_panel.py               Article Intake's per-article Discuss mode (stateless render fn)
   ai_context.py                 per-client "what's on screen" registry (see below)
   confirm_dialog.py             async confirm(title, message, ...) -> bool helper
   util.py                        client_alive() guard
@@ -38,8 +39,11 @@ services/<name>.py              backend logic per domain — pages call these, n
 services/ai/
   chat.py                        send_message(...) — routes to Claude/Gemini/Ollama
   tools.py                       tool implementations + auto-derived schemas
+  discuss.py                     Article Intake Discuss mode's grounded-chat backend
 docs/
-  DESIGN_BRIEF.md                 input to Claude Design
+  DESIGN_BRIEF.md                 input to Claude Design (whole dashboard)
+  INTAKE_UPGRADE_BRIEF.md         input to Claude Design (Article Intake tab specifically)
+  INTAKE_ARCHITECTURE.md          Article Intake code-level architecture (Code-facing, not Design)
   FEATURE_INVENTORY.md            parity checklist for the reskin
   IMPLEMENTATION_GUIDE.md          this file
 ```
@@ -99,15 +103,45 @@ Reuse these exactly; don't re-derive file paths, subprocess calls, or backend lo
 page code. Page modules should only ever import from `services.*`.
 
 ```python
-# services/intake.py
-list_articles() -> list[dict]                              # see FEATURE_INVENTORY / DESIGN_BRIEF for the article dict shape
-get_article(filename: str) -> dict | None                   # {'content': str}
+# services/intake.py -- reads homelab-intake's files directly by path (see
+# INTAKE_UPGRADE_BRIEF.md §8 for the article dict shape); queue.json read-modify-write
+# is fcntl-locked + atomic (2026-07-31, see _queue_lock()/_write_queue())
+list_articles() -> list[dict]                                # cached by articles-dir mtime signature
+get_article(filename: str) -> dict | None                    # {'content': str, 'summary': str}
 delete_article(filename: str) -> bool
 mark_duplicate(filename: str) -> bool
-resubmit_article(filename: str) -> dict                     # {'success': True} | {'error': str}
+add_to_folder(filename: str, folder: str) -> bool            # writes into the article's own frontmatter
+remove_from_folder(filename: str, folder: str) -> bool
+resubmit_article(filename: str) -> dict                      # {'success': True} | {'error': str}
 get_queue() -> list[dict]
 retry_queue_item(item_id: str) -> bool
-search_articles(question: str, top_k: int = 5) -> str        # semantic search, used by the AI tool
+search_articles(question: str, top_k: int = 5) -> str         # semantic search (plain text), used by the AI tool
+search_articles_with_citations(question, top_k=5) -> tuple[str, list[dict]]   # same, + citation records for Discuss
+
+# services/intake_state.py -- dashboard-owned sidecar state (intake_state.json /
+# intake_conversations.json), NOT part of homelab-intake; every read-modify-write is
+# fcntl-locked + atomic (2026-07-31, see _file_lock()/_atomic_write())
+get_article_state(article_id: str) -> dict                   # {'read', 'favorite', 'archived'}
+all_article_states() -> dict                                 # {article_id: state}
+set_article_state(article_id: str, **fields) -> None
+bulk_set_article_state(article_ids: list[str], **fields) -> None
+list_folders() -> list[str]
+create_folder(name: str) -> None
+get_prefs() -> dict                                            # {'view', 'sort'}
+set_prefs(**fields) -> None
+get_thread(article_id: str) -> list[dict]                      # Discuss conversation
+append_message(article_id: str, message: dict) -> None
+clear_thread(article_id: str) -> None
+thread_counts() -> dict                                        # {article_id: message_count}, list-row chip
+
+# services/plane.py -- "Send to HomeLab"
+send_article_to_plane(article: dict, summary: str) -> tuple[bool, str | None]
+
+# services/repo_search.py + services/ai/discuss.py -- backing the Discuss panel
+repo_search.repo_file_count() -> int
+discuss.send_discuss_message(article, active_sources, text, history, model) -> dict | None   # {'text', 'tool_calls'}
+discuss.placeholder_text(active_sources) -> str
+discuss.grounding_footer(active_sources, model_label) -> str
 
 # services/mods.py
 get_mods() -> dict                                            # {mod_name: {history, version, submitted_by, submitted_at}}

@@ -4,4 +4,5 @@ __pycache__/
 .env
 settings.json
 intake_state.json
+intake_state.json.lock
 intake_conversations.json

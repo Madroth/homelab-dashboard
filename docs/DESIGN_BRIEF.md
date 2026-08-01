@@ -52,6 +52,14 @@ Bazarr, Tautulli, Pulsarr, Uptime-Kuma, qBittorrent, Plex.
 ## 4. Real data shapes per page
 
 ### Article Intake
+
+> **Superseded** — this subsection describes the tab as of the original 2026-07-22
+> reskin. A dedicated Design pass shipped 2026-07-25 (custom folders, tag filtering,
+> bulk actions, cards/table view, keyboard shortcuts, Send to HomeLab) and a follow-on
+> AI Discuss mode + bug-fix pass landed since. **`INTAKE_UPGRADE_BRIEF.md` is the
+> current source of truth for this tab** — use it instead of the rest of this
+> subsection, which is kept only as a historical record of the original brief.
+
 Three-pane: folder list (All/Homelab/News/Errors, with live counts) + search → article
 list → reader pane.
 

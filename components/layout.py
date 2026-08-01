@@ -25,16 +25,22 @@ def build(request: Request):
             f'width:100vw;height:100vh;margin:0;background:{theme.BG};overflow:hidden'):
 
         current_tab = {'key': initial_tab}
+        nav_state = {'open': True}
 
         def select(key: str):
             current_tab['key'] = key
             tab_panels.set_value(key)
             ui.run_javascript(f"history.replaceState(null, '', '?tab={key}')")
-            nav_sidebar.build.refresh(key, select)
+            nav_sidebar.build.refresh(key, select, nav_state['open'], toggle_nav)
             ai_context.set_active_tab(key)
 
-        nav_sidebar.build(initial_tab, select)
-        live_state.register('nav_sidebar', lambda: nav_sidebar.build.refresh(current_tab['key'], select))
+        def toggle_nav():
+            nav_state['open'] = not nav_state['open']
+            nav_sidebar.build.refresh(current_tab['key'], select, nav_state['open'], toggle_nav)
+
+        nav_sidebar.build(initial_tab, select, nav_state['open'], toggle_nav)
+        live_state.register('nav_sidebar', lambda: nav_sidebar.build.refresh(
+            current_tab['key'], select, nav_state['open'], toggle_nav))
 
         with ui.column().style('flex:1;height:100%;min-width:0;gap:0'):
             with ui.row().classes('items-center no-wrap').style(
