@@ -83,7 +83,7 @@ async def _show_approved_details(item: dict, on_changed):
             success, error = result
             if success:
                 dialog.close()
-                await on_changed()
+                await on_changed(item['id'])
                 live_state.refresh_all(exclude='media')
             else:
                 ui.notify(f'Failed to reclassify: {error}', type='negative')
@@ -102,7 +102,7 @@ async def _show_approved_details(item: dict, on_changed):
             success, error = result
             if success:
                 dialog.close()
-                await on_changed()
+                await on_changed(item['id'])
                 live_state.refresh_all(exclude='media')
             else:
                 ui.notify(f'Failed to reject/delete: {error}', type='negative')
@@ -114,7 +114,7 @@ async def _show_approved_details(item: dict, on_changed):
             success, error = result
             if success:
                 dialog.close()
-                await on_changed()
+                await on_changed(item['id'])
                 live_state.refresh_all(exclude='media')
             else:
                 ui.notify(f'Failed to undo: {error}', type='negative')
@@ -140,19 +140,40 @@ MEDIA_FILTERS = [('', 'All')] + MEDIA_TYPES
 
 def build():
     state = {'queue': [], 'type_filter': '', 'selected_ids': set()}
+    # Per-item @ui.refreshable closures (created lazily, keyed by item id) -- lets a
+    # single-item change (select, approve, reject, edit) re-render just that one row
+    # instead of render_queue.refresh()'s full-queue rebuild (all visible items torn
+    # down and recreated), same fix applied to pages/intake.py's article rows after a
+    # ~1s-per-click delay was traced to that full-rebuild cost. See _get_row_refreshable().
+    row_refreshables: dict[str, object] = {}
 
     def filtered_queue():
         if not state['type_filter']:
             return state['queue']
         return [i for i in state['queue'] if i.get('media_type') == state['type_filter']]
 
+    def _get_row_refreshable(iid):
+        target = row_refreshables.get(iid)
+        if target is None:
+            @ui.refreshable
+            def _row():
+                item = next((x for x in state['queue'] if x['id'] == iid), None)
+                if item is not None:
+                    _render_item(item)
+            target = _row
+            row_refreshables[iid] = target
+        return target
+
     def toggle_select(item_id):
+        # Selection never changes filtered_queue()'s membership or order (it isn't a
+        # filter/sort criterion), so this is always safe as a single-row refresh --
+        # unlike reload() below, no before/after membership check is needed here.
         sel = state['selected_ids']
         if item_id in sel:
             sel.discard(item_id)
         else:
             sel.add(item_id)
-        render_queue.refresh()
+        _get_row_refreshable(item_id).refresh()
         render_bulk_bar.refresh()
 
     def clear_selection():
@@ -195,6 +216,83 @@ def build():
             ui.button('Clear', on_click=clear_selection).props('flat').style(
                 f'font-size:12px;font-weight:600;color:{theme.TEXT_MUTED}')
 
+    def _render_item(item):
+        iid = item['id']
+        selected = iid in state['selected_ids']
+        icon, grad = _type_visual(item.get('media_type'))
+        if item['status'] == 'approved':
+            with ui.row().classes('items-center no-wrap nq-nav-btn-hover').style(
+                    'background:rgba(166,227,161,0.05);border:1px solid rgba(166,227,161,0.2);'
+                    'border-radius:9px;padding:12px;gap:10px;width:100%'):
+                with ui.element('div').classes('cursor-pointer').style(
+                        f'width:17px;height:17px;border-radius:5px;flex:none;'
+                        f'border:1.5px solid {theme.ACCENT if selected else "rgba(255,255,255,0.2)"};'
+                        f'background:{theme.ACCENT if selected else "transparent"};display:flex;'
+                        f'align-items:center;justify-content:center'
+                ).on('click', lambda _, i=iid: toggle_select(i)).mark(f'row-select-{iid}'):
+                    if selected:
+                        ui.icon('fa-solid fa-check').style(f'font-size:9px;color:{theme.BG}')
+                with ui.element('div').style(
+                        f'width:34px;height:46px;border-radius:5px;background:{grad};flex:none;'
+                        f'display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.6)'):
+                    ui.icon(icon).style('font-size:14px')
+                with ui.column().classes('cursor-pointer').style(
+                        'gap:2px;flex:1;min-width:0'
+                ).on('click', lambda _, it=item: _show_approved_details(it, reload)):
+                    ui.label(f"Auto-sorted: {item['proposed_title']}").style(
+                        f'font-size:12.5px;font-weight:600;color:{theme.TEXT};overflow:hidden;'
+                        f'text-overflow:ellipsis;white-space:nowrap')
+                    with ui.row().classes('items-center no-wrap').style('gap:4px'):
+                        ui.icon('fa-solid fa-folder-tree').style(f'font-size:9px;color:{theme.TEXT_MUTED}')
+                        ui.label(item.get('proposed_path', '')).style(
+                            f'font-size:10.5px;color:{theme.TEXT_MUTED};overflow:hidden;'
+                            f'text-overflow:ellipsis;white-space:nowrap')
+                ui.label(item.get('created_at', '')).style(f'font-size:10.5px;color:{theme.TEXT_DIM}')
+        else:
+            meta = item.get('metadata') or {}
+            year = f"({meta['year']})" if meta.get('year') else ''
+            with ui.row().style(
+                    f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.07);border-radius:11px;'
+                    f'padding:16px;gap:14px;width:100%'):
+                with ui.element('div').classes('cursor-pointer').style(
+                        f'width:17px;height:17px;border-radius:5px;flex:none;margin-top:2px;'
+                        f'border:1.5px solid {theme.ACCENT if selected else "rgba(255,255,255,0.2)"};'
+                        f'background:{theme.ACCENT if selected else "transparent"};display:flex;'
+                        f'align-items:center;justify-content:center'
+                ).on('click', lambda _, i=iid: toggle_select(i)).mark(f'row-select-{iid}'):
+                    if selected:
+                        ui.icon('fa-solid fa-check').style(f'font-size:9px;color:{theme.BG}')
+                with ui.element('div').style(
+                        f'width:62px;height:88px;border-radius:7px;background:{grad};flex:none;'
+                        f'display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.65)'):
+                    ui.icon(icon).style('font-size:22px')
+                with ui.column().style('flex:1;min-width:0;gap:9px'):
+                    ui.label(f"Original: {item['original_filename']}").style(
+                        f'font-size:11px;color:{theme.TEXT_MUTED};overflow:hidden;'
+                        f'text-overflow:ellipsis;white-space:nowrap')
+                    with ui.row().classes('items-center no-wrap').style('gap:8px;flex-wrap:wrap'):
+                        ui.label(f"{item['proposed_title']} {year}").style(
+                            f'font-size:15px;font-weight:600;color:{theme.TEXT}')
+                        if item.get('needs_intervention'):
+                            ui.label('NEEDS REVIEW').style(
+                                f'font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:10px;'
+                                f'background:rgba(243,139,168,0.15);color:{theme.RED};'
+                                f'border:1px solid rgba(243,139,168,0.4)')
+                    with ui.row().classes('items-center no-wrap').style('gap:4px'):
+                        ui.icon('fa-solid fa-folder-tree').style(f'font-size:9px;color:{theme.ACCENT}')
+                        ui.label(item.get('proposed_path', '')).style(f'font-size:11px;color:{theme.ACCENT}')
+
+                    with ui.row().style('gap:8px;width:100%;flex-wrap:wrap'):
+                        ui.button('Approve', on_click=lambda _, i=iid: do_approve(i)).mark(f'approve-{iid}').style(
+                            f'background:{theme.GREEN};color:{theme.BG};font-weight:700')
+                        ui.button('Edit Title', on_click=lambda _, i=iid, t=item['proposed_title']:
+                                   do_edit(i, t)).mark(f'edit-{iid}').props('flat').style(
+                            f'background:rgba(165,180,252,0.15);color:{theme.ACCENT}')
+                        ui.button('Reject', on_click=lambda _, i=iid: do_reject(i)).mark(f'reject-{iid}').props(
+                            'outline').style(f'color:{theme.RED}')
+                        ui.button('Details', on_click=lambda _, it=item: _show_approved_details(it, reload)).mark(
+                            f'details-{iid}').props('flat').style(f'color:{theme.TEXT_MUTED}')
+
     @ui.refreshable
     def render_queue():
         queue = filtered_queue()
@@ -205,81 +303,7 @@ def build():
                 ui.label('Queue is empty. Waiting for media...')
             return
         for item in queue:
-            iid = item['id']
-            selected = iid in state['selected_ids']
-            icon, grad = _type_visual(item.get('media_type'))
-            if item['status'] == 'approved':
-                with ui.row().classes('items-center no-wrap nq-nav-btn-hover').style(
-                        'background:rgba(166,227,161,0.05);border:1px solid rgba(166,227,161,0.2);'
-                        'border-radius:9px;padding:12px;gap:10px;width:100%'):
-                    with ui.element('div').classes('cursor-pointer').style(
-                            f'width:17px;height:17px;border-radius:5px;flex:none;'
-                            f'border:1.5px solid {theme.ACCENT if selected else "rgba(255,255,255,0.2)"};'
-                            f'background:{theme.ACCENT if selected else "transparent"};display:flex;'
-                            f'align-items:center;justify-content:center'
-                    ).on('click', lambda _, i=iid: toggle_select(i)):
-                        if selected:
-                            ui.icon('fa-solid fa-check').style(f'font-size:9px;color:{theme.BG}')
-                    with ui.element('div').style(
-                            f'width:34px;height:46px;border-radius:5px;background:{grad};flex:none;'
-                            f'display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.6)'):
-                        ui.icon(icon).style('font-size:14px')
-                    with ui.column().classes('cursor-pointer').style(
-                            'gap:2px;flex:1;min-width:0'
-                    ).on('click', lambda _, it=item: _show_approved_details(it, reload)):
-                        ui.label(f"Auto-sorted: {item['proposed_title']}").style(
-                            f'font-size:12.5px;font-weight:600;color:{theme.TEXT};overflow:hidden;'
-                            f'text-overflow:ellipsis;white-space:nowrap')
-                        with ui.row().classes('items-center no-wrap').style('gap:4px'):
-                            ui.icon('fa-solid fa-folder-tree').style(f'font-size:9px;color:{theme.TEXT_MUTED}')
-                            ui.label(item.get('proposed_path', '')).style(
-                                f'font-size:10.5px;color:{theme.TEXT_MUTED};overflow:hidden;'
-                                f'text-overflow:ellipsis;white-space:nowrap')
-                    ui.label(item.get('created_at', '')).style(f'font-size:10.5px;color:{theme.TEXT_DIM}')
-            else:
-                meta = item.get('metadata') or {}
-                year = f"({meta['year']})" if meta.get('year') else ''
-                with ui.row().style(
-                        f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.07);border-radius:11px;'
-                        f'padding:16px;gap:14px;width:100%'):
-                    with ui.element('div').classes('cursor-pointer').style(
-                            f'width:17px;height:17px;border-radius:5px;flex:none;margin-top:2px;'
-                            f'border:1.5px solid {theme.ACCENT if selected else "rgba(255,255,255,0.2)"};'
-                            f'background:{theme.ACCENT if selected else "transparent"};display:flex;'
-                            f'align-items:center;justify-content:center'
-                    ).on('click', lambda _, i=iid: toggle_select(i)):
-                        if selected:
-                            ui.icon('fa-solid fa-check').style(f'font-size:9px;color:{theme.BG}')
-                    with ui.element('div').style(
-                            f'width:62px;height:88px;border-radius:7px;background:{grad};flex:none;'
-                            f'display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.65)'):
-                        ui.icon(icon).style('font-size:22px')
-                    with ui.column().style('flex:1;min-width:0;gap:9px'):
-                        ui.label(f"Original: {item['original_filename']}").style(
-                            f'font-size:11px;color:{theme.TEXT_MUTED};overflow:hidden;'
-                            f'text-overflow:ellipsis;white-space:nowrap')
-                        with ui.row().classes('items-center no-wrap').style('gap:8px;flex-wrap:wrap'):
-                            ui.label(f"{item['proposed_title']} {year}").style(
-                                f'font-size:15px;font-weight:600;color:{theme.TEXT}')
-                            if item.get('needs_intervention'):
-                                ui.label('NEEDS REVIEW').style(
-                                    f'font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:10px;'
-                                    f'background:rgba(243,139,168,0.15);color:{theme.RED};'
-                                    f'border:1px solid rgba(243,139,168,0.4)')
-                        with ui.row().classes('items-center no-wrap').style('gap:4px'):
-                            ui.icon('fa-solid fa-folder-tree').style(f'font-size:9px;color:{theme.ACCENT}')
-                            ui.label(item.get('proposed_path', '')).style(f'font-size:11px;color:{theme.ACCENT}')
-
-                        with ui.row().style('gap:8px;width:100%;flex-wrap:wrap'):
-                            ui.button('Approve', on_click=lambda _, i=iid: do_approve(i)).style(
-                                f'background:{theme.GREEN};color:{theme.BG};font-weight:700')
-                            ui.button('Edit Title', on_click=lambda _, i=iid, t=item['proposed_title']:
-                                       do_edit(i, t)).props('flat').style(
-                                f'background:rgba(165,180,252,0.15);color:{theme.ACCENT}')
-                            ui.button('Reject', on_click=lambda _, i=iid: do_reject(i)).props(
-                                'outline').style(f'color:{theme.RED}')
-                            ui.button('Details', on_click=lambda _, it=item: _show_approved_details(it, reload)).props(
-                                'flat').style(f'color:{theme.TEXT_MUTED}')
+            _get_row_refreshable(item['id'])()
 
     async def do_approve(item_id):
         result = await run.io_bound(media.approve, str(item_id))
@@ -290,7 +314,7 @@ def build():
             ui.notify(f'Approve failed: {error}', type='negative')
         else:
             ui.notify('Approved.', type='positive')
-        await reload()
+        await reload(item_id)
         live_state.refresh_all(exclude='media')
 
     async def do_reject(item_id):
@@ -305,7 +329,7 @@ def build():
             ui.notify(f'Reject failed: {error}', type='negative')
         else:
             ui.notify('Rejected.', type='positive')
-        await reload()
+        await reload(item_id)
         live_state.refresh_all(exclude='media')
 
     async def do_edit(item_id, current_title):
@@ -318,7 +342,7 @@ def build():
         success, error = result
         if not success:
             ui.notify(f'Edit failed: {error}', type='negative')
-        await reload()
+        await reload(item_id)
         live_state.refresh_all(exclude='media')
 
     async def bulk(action: str):
@@ -339,14 +363,27 @@ def build():
         await reload()
         live_state.refresh_all(exclude='media')
 
-    async def reload():
+    async def reload(changed_id=None):
+        """changed_id, when given, names the single item a caller knows it just
+        mutated (approve/reject/edit/reclassify/undo). If the refetched queue's
+        filtered membership and order didn't actually change -- the common case for a
+        single-item status/title edit -- refresh just that one row instead of paying
+        render_queue.refresh()'s full-list rebuild cost. Callers that don't know a
+        specific id (bulk actions, the periodic poll, initial load) always get the
+        full, definitely-correct refresh."""
+        before_ids = [i['id'] for i in filtered_queue()]
         queue = await run.io_bound(media.get_queue)
         if queue is None:
             return
-        if client_alive():
-            state['queue'] = queue
+        if not client_alive():
+            return
+        state['queue'] = queue
+        after_ids = [i['id'] for i in filtered_queue()]
+        if changed_id is not None and before_ids == after_ids and changed_id in row_refreshables:
+            _get_row_refreshable(changed_id).refresh()
+        else:
             render_queue.refresh()
-            render_bulk_bar.refresh()
+        render_bulk_bar.refresh()
 
     def get_context_summary():
         queue = state['queue']
