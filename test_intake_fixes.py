@@ -251,6 +251,41 @@ async def test_open_and_close_reader(user: User, isolated_intake):
 
 
 @pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_row_action_icon_does_not_also_open_reader(user: User, isolated_intake):
+    """The action icons (read/favorite/archive/etc.) were moved to sit inside the same
+    clickable column as the title (2026-08-01, to stop them eating ~half the row's
+    width in the old side-by-side layout) -- their 'click.stop' modifier must keep a
+    click on an icon from also bubbling up to the column's own select_article handler
+    and opening the reader, which would be a real regression from this move."""
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    aid = '2026-07-30-235959-new-article.md'
+
+    user.find(marker=f'row-f-{aid}').click()  # favorite icon, nested inside the row now
+    await asyncio.sleep(0.3)
+    await user.should_not_see(marker='reader-mode-read')
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_switching_between_articles_updates_reader_content(user: User, isolated_intake):
+    """select_article()/move_focus() were changed (2026-08-01) to refresh just the
+    previously- and newly-focused rows instead of render_articles.refresh()'s
+    full-list rebuild -- opening an article was taking 1s+ from that rebuild cost
+    alone. Confirm switching between two articles still correctly updates the reader
+    to the second article's content, not stale content left over from the first."""
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    new_aid = '2026-07-30-235959-new-article.md'
+    old_aid = '2026-01-01-120000-old-article.md'
+
+    user.find(marker=f'article-row-{new_aid}').click()
+    await user.should_see('Test summary for New Article', retries=20)
+
+    user.find(marker=f'article-row-{old_aid}').click()
+    await user.should_see('Test summary for Old Article', retries=20)
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
 async def test_article_content_actually_loads(user: User, isolated_intake):
     """Caught live: the reader header/tabs render immediately regardless of whether
     the article body ever loads, so a passing 'reader-mode-read is visible' check

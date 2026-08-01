@@ -116,15 +116,16 @@ deliberately rather than just in passing.
 
 ## 6. Reader pane
 
-- [ ] Click an article — reader opens on the right, list narrows to make room
+- [ ] Click an article — reader opens on the right, list narrows to a fixed width and
+      the reader fills the rest of the window (no blank space on a wide monitor)
 - [ ] **Scroll partway down a long article list, then click an article roughly in
       the middle of your scroll position.** This is the specific bug an external
       review caught and I fixed — confirm the list does *not* jump back to the top
       when the reader opens. This is the single most important thing to check in
       this whole guide
-- [ ] Click the expand icon — reader widens (560px → 860px), click again — goes full
-      width and the list hides entirely. A compress icon should appear once you're
-      off the normal size; click it to snap straight back
+- [ ] Click the expand icon — goes full width and the list hides entirely, with a
+      "Show list" label (not just a small icon) to get back — click it to snap
+      straight back to the list+reader layout
 - [ ] Use the prev/next chevrons in the reader header — moves to the adjacent
       article in your current filtered/sorted list, and the "N of M" counter updates
 - [ ] Content / AI Summary tabs both render something

@@ -488,21 +488,30 @@ def build():
         cur = state.get('focused_id')
         idx = ids.index(cur) if cur in ids else -1
         new_idx = min(max(idx + delta, 0), len(ids) - 1)
-        state['focused_id'] = ids[new_idx]
-        render_articles.refresh()
+        new_focused = ids[new_idx]
+        state['focused_id'] = new_focused
+        # Same single-row-refresh optimization as select_article() below -- j/k only
+        # changes which row is highlighted, not filtered_articles()'s membership/order.
+        if cur and cur != new_focused and cur in row_refreshables:
+            _get_row_refreshable(cur).refresh()
+        if new_focused in row_refreshables:
+            _get_row_refreshable(new_focused).refresh()
+        else:
+            render_articles.refresh()
         if state.get('selected'):
-            await select_article(state['focused_id'])
+            await select_article(new_focused)
 
     async def select_article(aid):
-        # Captured *before* render_articles.refresh() below: that refresh rebuilds
-        # the clicked row, and NiceGUI runs this whole handler (every await included)
-        # inside the slot the click captured at dispatch time. Once this function
-        # destroys its own originating slot, context.client stops resolving for the
-        # rest of the handler -- load_article_content's client_alive() check would
-        # silently see a RuntimeError-turned-False and skip populating the reader
-        # forever, even though the browser tab never went anywhere. See
+        # Captured *before* any row refresh below: refreshing the clicked row's own
+        # target rebuilds it, and NiceGUI runs this whole handler (every await
+        # included) inside the slot the click captured at dispatch time. Once this
+        # function destroys its own originating slot, context.client stops resolving
+        # for the rest of the handler -- load_article_content's client_alive() check
+        # would silently see a RuntimeError-turned-False and skip populating the
+        # reader forever, even though the browser tab never went anywhere. See
         # components/util.py's capture_client() docstring for the full mechanism.
         client = capture_client()
+        prev_focused = state.get('focused_id')
         state['selected'] = aid
         state['article_content'] = None
         state['reader_tab'] = 'content'
@@ -510,11 +519,20 @@ def build():
         state['focused_id'] = aid
         # update_layout() only adjusts the (persistent) list/reader columns' own
         # width/visibility -- it never tears down the list itself, so scroll position
-        # survives opening/closing/resizing the reader. render_articles still needs
-        # its own refresh to move the focused-row highlight; render_reader to load the
-        # newly-selected article's content.
+        # survives opening/closing/resizing the reader. Only the previously-focused
+        # and newly-focused rows' highlight actually changes, so refresh just those
+        # two instead of render_articles.refresh()'s full-list rebuild -- opening an
+        # article doesn't change filtered_articles()'s membership/order, unlike
+        # toggle_read/toggle_favorite/toggle_archived, so no fallback case is needed
+        # here. (Chris, 2026-08-01: opening an article was taking 1s+ from exactly
+        # this full-rebuild cost, on top of the actual content fetch below.)
         update_layout()
-        render_articles.refresh()
+        if prev_focused and prev_focused != aid and prev_focused in row_refreshables:
+            _get_row_refreshable(prev_focused).refresh()
+        if aid in row_refreshables:
+            _get_row_refreshable(aid).refresh()
+        else:
+            render_articles.refresh()
         render_reader.refresh()
         await load_article_content(aid, client)
 
@@ -558,10 +576,11 @@ def build():
         await set_reader_mode('discuss')
 
     def cycle_reader_wider():
-        if state['reader_size'] == 'normal':
-            state['reader_size'] = 'wide'
-        elif state['reader_size'] == 'wide':
-            state['reader_size'] = 'full'
+        # Two states, not three: 'normal' already fills all space left of the fixed
+        # list column (see update_layout()), so a former middle 'wide' step would be
+        # visually identical to 'normal' -- an expand button that appears to do
+        # nothing. 'full' remains meaningfully different: it also hides the list.
+        state['reader_size'] = 'full' if state['reader_size'] != 'full' else 'normal'
         update_layout()
         render_reader.refresh()
 
@@ -1151,11 +1170,21 @@ def build():
                                 f'font-size:9.5px;color:{theme.PURPLE};background:rgba(203,166,247,0.1);'
                                 f'border-radius:8px;padding:1px 7px')
 
-            _render_row_actions(aid, wf)
+                _render_row_actions(aid, wf)
 
     def _render_row_actions(aid: str, wf: dict):
+        # Sits inside the same clickable column as the title/snippet now (moved out of
+        # the old side-by-side layout, which fixed 178px of action icons ate roughly
+        # half the row width on a narrower list pane -- Chris, 2026-08-01). 'click.stop'
+        # (a Quasar/Vue event modifier NiceGUI passes straight through to the frontend,
+        # see element.on()'s docstring) keeps a click on any icon/button here from also
+        # bubbling up to the column's own on('click', select_article) and opening the
+        # reader -- it only needs to be attached once at this wrapping row's level;
+        # each icon's own listener already fires on the target before bubbling starts.
         if aid in state['confirming_ids']:
-            with ui.row().classes('items-center no-wrap').style('gap:6px;flex:none;width:178px;justify-content:flex-end'):
+            with ui.row().classes('items-center no-wrap').style(
+                    'gap:6px;width:100%;margin-top:2px'
+            ).on('click.stop', js_handler='() => {}'):
                 ui.label('Delete?').style(f'font-size:11.5px;color:{theme.RED};font-weight:600')
                 ui.button('Yes', on_click=lambda: confirm_delete(aid)).props('flat dense').style(
                     f'color:{theme.RED};font-size:11px;min-width:0;padding:2px 8px')
@@ -1163,7 +1192,9 @@ def build():
                     f'color:{theme.TEXT_MUTED};font-size:11px;min-width:0;padding:2px 8px')
             return
 
-        with ui.row().classes('items-center no-wrap').style('gap:2px;flex:none;width:178px;justify-content:flex-end'):
+        with ui.row().classes('items-center no-wrap').style(
+                'gap:2px;width:100%;margin-top:2px'
+        ).on('click.stop', js_handler='() => {}'):
             for icon, tip, is_on, color, handler, mark_name in [
                 ('fa-solid fa-circle-check' if wf['read'] else 'fa-regular fa-circle', 'Read/unread',
                  wf['read'], theme.GREEN, lambda _, i=aid: toggle_read(i), 'r'),
@@ -1318,26 +1349,68 @@ def build():
                         f'color:{theme.TEXT_MUTED};font-size:11.5px')
             else:
                 is_sending = aid in state['sending_ids']
-                with ui.row().style('gap:8px;flex-wrap:wrap;margin-bottom:14px'):
-                    ui.button('Discuss', icon='forum', on_click=lambda: open_discuss(aid)).props('outline').style(
-                        f'color:{theme.ACCENT}')
+                # Every action here is a small icon button now, matching the
+                # article-list row's style (Chris, 2026-08-01: felt redundant as full
+                # labeled buttons). 'Flag duplicate' was dropped entirely rather than
+                # shrunk -- duplicate detection already runs automatically at ingest
+                # (semantic/embedding dedup in homelab-intake's daemon, see
+                # services/intake.py's is_duplicate), the manual toggle only existed
+                # to correct that automatic call, and Chris decided that's not worth a
+                # dedicated control here: the "Duplicate" badge above (_badge()) still
+                # surfaces the status passively, and Delete covers the case where he
+                # actually wants a wrongly-kept duplicate gone. (The list row's own
+                # "..." overflow menu still has a manual flag/clear entry -- untouched,
+                # out of scope for this change.) Marker names are prefixed 'reader-' --
+                # the list row's own icons for this same article use unprefixed marker
+                # names and are visible on screen at the same time, so both need to
+                # stay uniquely findable.
+                with ui.row().classes('items-center no-wrap').style('gap:6px;flex-wrap:wrap;margin-bottom:14px'):
+                    icon_actions = [
+                        ('fa-solid fa-comment-dots', 'Discuss', True, theme.ACCENT,
+                         lambda _, i=aid: open_discuss(i), 'reader-discuss'),
+                    ]
                     if art.get('source'):
-                        ui.button('Open original', icon='open_in_new', on_click=lambda u=art['source']: ui.navigate.to(
-                            u, new_tab=True)).props('outline').style(f'color:{theme.TEXT_MUTED}')
-                    ui.button('Favorite' if not wf['favorite'] else 'Unfavorite', icon='star',
-                              on_click=lambda: toggle_favorite(aid)).props('outline').style(f'color:{theme.AMBER}')
-                    ui.button('Sending…' if is_sending else 'Send to HomeLab', icon='send',
-                              on_click=lambda: send_to_homelab(aid)).props(
-                        'outline loading disable' if is_sending else 'outline').style(f'color:{theme.PURPLE}')
-                    ui.button('Unarchive' if wf['archived'] else 'Archive', icon='inventory_2',
-                              on_click=lambda: toggle_archived(aid)).props('outline').style(f'color:{theme.ACCENT}')
-                    ui.button('Clear duplicate' if art.get('is_duplicate') else 'Flag duplicate',
-                              icon='content_copy', on_click=lambda: mark_duplicate_row(aid)).props(
-                        'outline').style(f'color:{theme.TEXT_MUTED}')
-                    ui.button('Resubmit', icon='refresh', on_click=lambda: resubmit_row(aid)).props(
-                        'outline').style(f'color:{theme.ACCENT}')
-                    ui.button('Delete', icon='delete', on_click=lambda: request_delete(aid)).props(
-                        'outline').style(f'color:{theme.RED}')
+                        icon_actions.append((
+                            'fa-solid fa-arrow-up-right-from-square', 'Open original', True, theme.TEXT_MUTED,
+                            lambda _, u=art['source']: ui.navigate.to(u, new_tab=True), 'reader-open-original'))
+                    icon_actions += [
+                        ('fa-solid fa-star' if wf['favorite'] else 'fa-regular fa-star', 'Favorite',
+                         wf['favorite'], theme.AMBER, lambda _, i=aid: toggle_favorite(i), 'reader-f'),
+                        ('fa-solid fa-box-archive', 'Archive/unarchive', wf['archived'], theme.ACCENT,
+                         lambda _, i=aid: toggle_archived(i), 'reader-a'),
+                    ]
+                    for icon, tip, is_on, color, handler, mark_name in icon_actions:
+                        with ui.element('div').classes('cursor-pointer').style(
+                                'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
+                                'justify-content:center'
+                        ).on('click', handler).mark(f'row-{mark_name}-{aid}').tooltip(tip):
+                            ui.icon(icon).style(f'font-size:12.5px;color:{color if is_on else theme.TEXT_DIM}')
+
+                    if is_sending:
+                        with ui.element('div').style(
+                                'width:28px;height:28px;display:flex;align-items:center;justify-content:center'
+                        ).mark(f'reader-sending-{aid}'):
+                            ui.spinner(size='xs').style(f'color:{theme.PURPLE}')
+                    else:
+                        with ui.element('div').classes('cursor-pointer').style(
+                                'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
+                                'justify-content:center'
+                        ).on('click', lambda _, i=aid: send_to_homelab(i)).mark(
+                                f'reader-send-icon-{aid}').tooltip('Send to HomeLab'):
+                            ui.icon('fa-solid fa-arrow-up-from-bracket').style(f'font-size:12.5px;color:{theme.PURPLE}')
+
+                    with ui.element('div').classes('cursor-pointer').style(
+                            'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
+                            'justify-content:center'
+                    ).on('click', lambda _, i=aid: resubmit_row(i)).mark(f'reader-resubmit-{aid}').tooltip('Resubmit'):
+                        ui.icon('fa-solid fa-rotate-right').style(f'font-size:12.5px;color:{theme.ACCENT}')
+
+                    with ui.element('div').classes('cursor-pointer').style(
+                            'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
+                            'justify-content:center'
+                    ).on('click', lambda _, i=aid: request_delete(i)).mark(
+                            f'reader-delete-icon-{aid}').tooltip('Delete'):
+                        ui.icon('fa-solid fa-trash').style(f'font-size:12.5px;color:{theme.RED}')
 
         if art.get('why_it_matters'):
             with ui.column().style(
@@ -1383,23 +1456,17 @@ def build():
                     f'padding:10px 16px;border-bottom:1px solid {theme.BORDER};gap:10px;width:100%'):
                 if state['reader_size'] == 'full':
                     # Full width hides the article list entirely, which is the most
-                    # disorienting of the three sizes -- give the way back a visible
+                    # disorienting of the two sizes -- give the way back a visible
                     # text label, not just a small icon, so it's easy to find (live
                     # testing showed the icon-only version was easy to miss entirely).
                     with ui.row().classes('items-center no-wrap cursor-pointer').style(
                             f'gap:5px').on('click', lambda: reset_reader_size()):
                         ui.icon('fa-solid fa-compress').style(f'font-size:11px;color:{theme.ACCENT}')
                         ui.label('Show list').style(f'font-size:11.5px;font-weight:600;color:{theme.ACCENT}')
-                elif state['reader_size'] == 'wide':
-                    ui.icon('fa-solid fa-compress').classes('cursor-pointer').style(
-                        f'font-size:11px;color:{theme.TEXT_DIM}').on('click', lambda: reset_reader_size()).tooltip(
-                        'Back to normal width')
-                    ui.label('Full width').classes('cursor-pointer').style(
-                        f'font-size:10.5px;color:{theme.TEXT_DIM}').on('click', lambda: cycle_reader_wider())
                 else:
                     ui.icon('fa-solid fa-expand').classes('cursor-pointer').style(
                         f'font-size:11px;color:{theme.TEXT_DIM}').on('click', lambda: cycle_reader_wider()).tooltip(
-                        'Wider')
+                        'Full width')
                 with ui.row().style(f'gap:3px;background:{theme.CARD_BG};border-radius:8px;padding:3px'):
                     for key, label in [('read', 'Read'), ('discuss', 'Discuss')]:
                         active = state['reader_mode'] == key
@@ -1475,15 +1542,22 @@ def build():
     def update_layout():
         reader_open = bool(state.get('selected'))
         reader_full = reader_open and state['reader_size'] == 'full'
-        reader_width = {'normal': '560px', 'wide': '860px'}.get(state['reader_size'], '560px')
 
         list_col.set_visibility(not reader_full)
+        # flex:1 when the reader's closed (list gets the full width); a fixed narrow
+        # width once it's open, so the reader -- not the list -- gets whatever space
+        # is left (Chris, 2026-08-01: wanted the article content easier to read, not
+        # a wider triage list). Irrelevant when reader_full since the list is hidden.
         list_col.style(replace=f'{"flex:1" if not reader_open else "width:380px;flex:none"};{_LIST_BASE_STYLE}')
 
         reader_col.set_visibility(reader_open)
         if reader_open:
-            reader_col.style(replace=f'{"flex:1" if reader_full else f"width:{reader_width};flex:none"};'
-                                       f'{_READER_BASE_STYLE}')
+            # Always flex:1 once open, at both remaining sizes ('normal' fills what's
+            # left next to the list; 'full' fills everything once the list is hidden
+            # too) -- previously 'normal'/'wide' were fixed 560px/860px, which left a
+            # dead blank region on anything wider than list+reader's combined fixed
+            # widths on a wide monitor.
+            reader_col.style(replace=f'flex:1;{_READER_BASE_STYLE}')
 
     def get_context_summary():
         folder_desc = f"folder='{state['folder']}'"
