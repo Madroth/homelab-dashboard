@@ -7,7 +7,7 @@ from nicegui import run, ui
 from components import ai_context, discuss_panel, live_state, theme
 from components.confirm_dialog import confirm
 from components.util import capture_client, client_alive
-from services import intake, intake_state, plane
+from services import fulltext, intake, intake_state, plane
 from services.ai import discuss
 
 SORT_OPTIONS = [
@@ -113,8 +113,11 @@ def build():
         'prefs': {'density': 'cozy', 'sort': 'unread'},
         'folder': 'all', 'tag_filters': set(), 'tag_search': '', 'search': '',
         'select_mode': False, 'selected_ids': set(),
-        'selected': None, 'article_content': None, 'reader_tab': 'content', 'reader_mode': 'read',
+        'selected': None, 'article_content': None, 'reader_mode': 'read',
         'reader_size': 'normal',
+        # 'idle' -> no source URL (never fetchable); 'loading' -> fetch in flight;
+        # 'ready' -> text populated; 'failed' -> fetch failed, retry offered
+        'fulltext': {'status': 'idle', 'text': None},
         'discuss': {'model': 'claude', 'active_sources': {'article', 'archive'},
                      'repo_scope_open': False, 'thread': [], 'busy': False},
         'focused_id': None, 'articles_loaded': False, 'sending_ids': set(), 'confirming_ids': set(),
@@ -514,7 +517,7 @@ def build():
         prev_focused = state.get('focused_id')
         state['selected'] = aid
         state['article_content'] = None
-        state['reader_tab'] = 'content'
+        state['fulltext'] = {'status': 'idle', 'text': None}
         state['reader_mode'] = 'read'
         state['focused_id'] = aid
         # update_layout() only adjusts the (persistent) list/reader columns' own
@@ -542,9 +545,6 @@ def build():
         update_layout()
         render_reader.refresh()
 
-    def set_reader_tab(tab):
-        state['reader_tab'] = tab
-        render_reader.refresh()
 
     async def set_reader_mode(mode):
         state['reader_mode'] = mode
@@ -594,6 +594,37 @@ def build():
         if client_alive(client) and state.get('selected') == aid:
             state['article_content'] = data or {'content': '*Error loading article.*'}
             render_reader.refresh()
+            await load_full_text(aid, client)
+
+    async def load_full_text(aid, client=None):
+        """Populates the reader's 'Full article' section: instant from cache when
+        available, otherwise a network fetch of the source URL (first open of an
+        article, or a retry). Every await can outlive the open article -- both the
+        client and the still-selected check must pass before touching state."""
+        art = next((a for a in state['articles'] if a['id'] == aid), None)
+        if not art or not art.get('source'):
+            return  # no source URL -> section renders its 'nothing to fetch' note
+        cached = await run.io_bound(fulltext.get_cached, aid)
+        if not client_alive(client) or state.get('selected') != aid:
+            return
+        if cached:
+            state['fulltext'] = {'status': 'ready', 'text': cached}
+            render_reader.refresh()
+            return
+        state['fulltext'] = {'status': 'loading', 'text': None}
+        render_reader.refresh()
+        text = await run.io_bound(fulltext.fetch_and_cache, aid, art['source'])
+        if not client_alive(client) or state.get('selected') != aid:
+            return
+        state['fulltext'] = {'status': 'ready', 'text': text} if text else {'status': 'failed', 'text': None}
+        render_reader.refresh()
+
+    async def retry_full_text():
+        # Captured here, not inside load_full_text: its render_reader.refresh() tears
+        # down the Retry control's own slot mid-handler (capture_client() docstring).
+        aid = state.get('selected')
+        if aid:
+            await load_full_text(aid, capture_client())
 
     async def _delete_article_and_cleanup(aid):
         """No-confirm delete primitive shared by every delete path (single, table-row,
@@ -708,6 +739,13 @@ def build():
         await select_article(aid)
 
     async def discuss_send(text):
+        # Captured before the busy-spinner refresh below: the Discuss input lives
+        # inside render_reader's subtree, so render_reader.refresh() tears down this
+        # handler's originating slot and a bare client_alive() after the model call
+        # would always read "disconnected" -- dropping the reply and leaving the
+        # spinner stuck on "… is reading …" forever (hit live 2026-08-02; same
+        # mechanism as select_article/send_to_homelab, see capture_client()).
+        client = capture_client()
         text = (text or '').strip()
         if not text:
             return
@@ -731,17 +769,24 @@ def build():
             result = await run.io_bound(discuss.send_discuss_message, art, active_sources, text, history, model)
         except Exception as e:
             result = {'text': f'Error: {e}', 'tool_calls': []}
-        if result is None:
-            result = {'text': 'Cancelled.', 'tool_calls': []}
         state['discuss']['busy'] = False
-        if not client_alive() or state['selected'] != aid:
-            return
+        if result is None:
+            return  # io_bound cancelled (shutdown/teardown) -- no reply to keep
         cites = [c for tc in result.get('tool_calls', []) for c in tc.get('cites', [])]
         assistant_msg = {'role': 'assistant', 'text': result.get('text', ''),
                           'tools': result.get('tool_calls', []), 'cites': cites}
-        state['discuss']['thread'].append(assistant_msg)
+        # Persist unconditionally (mirrors send_to_homelab): the reply was really
+        # generated, so it must land in the on-disk thread even if the tab closed
+        # mid-call -- reopening Discuss then shows it instead of losing it.
         await run.io_bound(intake_state.append_message, aid, assistant_msg)
         state['thread_counts'][aid] = state['thread_counts'].get(aid, 0) + 1
+        if not client_alive(client):
+            return
+        if state['selected'] == aid:
+            # Only the in-memory thread is per-open-article; if Chris switched
+            # articles mid-reply, state['discuss'] already belongs to the new one --
+            # appending there would leak the reply into the wrong thread.
+            state['discuss']['thread'].append(assistant_msg)
         render_reader.refresh()
         render_articles.refresh()
 
@@ -1316,10 +1361,10 @@ def build():
 
     # ---------- rendering: reader ----------
 
-    def _reader_content_block(art: dict, data: dict | None, show_actions: bool):
+    def _reader_content_block(art: dict, data: dict | None):
         """Shared between plain Read mode and Discuss mode's left-hand article pane --
-        badge/meta/title/why-it-matters/body, with the action row only in plain Read
-        mode (Discuss mode's left pane is read-only prose alongside the chat)."""
+        badge/meta/title/action row/why-it-matters/body (Chris, 2026-08-04: the action
+        row stays visible in Discuss mode too, not just plain Read mode)."""
         if data is None:
             ui.spinner(size='lg')
             return
@@ -1337,80 +1382,79 @@ def build():
             ui.label(f"{art.get('reading_minutes', 1)} min read").style(f'font-size:12px;color:{theme.TEXT_DIM}')
         ui.label(art['title']).style(f'font-size:20px;font-weight:700;margin-bottom:10px;color:{theme.TEXT}')
 
-        if show_actions:
-            aid = art['id']
-            wf = _wf(aid)
-            if aid in state['confirming_ids']:
-                with ui.row().classes('items-center no-wrap').style('gap:8px;margin-bottom:14px'):
-                    ui.label('Delete this article?').style(f'font-size:12.5px;color:{theme.RED};font-weight:600')
-                    ui.button('Yes, delete', on_click=lambda: confirm_delete(aid)).props('dense').style(
-                        f'background:{theme.RED};color:{theme.BG};font-size:11.5px')
-                    ui.button('Cancel', on_click=lambda: cancel_delete(aid)).props('flat dense').style(
-                        f'color:{theme.TEXT_MUTED};font-size:11.5px')
-            else:
-                is_sending = aid in state['sending_ids']
-                # Every action here is a small icon button now, matching the
-                # article-list row's style (Chris, 2026-08-01: felt redundant as full
-                # labeled buttons). 'Flag duplicate' was dropped entirely rather than
-                # shrunk -- duplicate detection already runs automatically at ingest
-                # (semantic/embedding dedup in homelab-intake's daemon, see
-                # services/intake.py's is_duplicate), the manual toggle only existed
-                # to correct that automatic call, and Chris decided that's not worth a
-                # dedicated control here: the "Duplicate" badge above (_badge()) still
-                # surfaces the status passively, and Delete covers the case where he
-                # actually wants a wrongly-kept duplicate gone. (The list row's own
-                # "..." overflow menu still has a manual flag/clear entry -- untouched,
-                # out of scope for this change.) Marker names are prefixed 'reader-' --
-                # the list row's own icons for this same article use unprefixed marker
-                # names and are visible on screen at the same time, so both need to
-                # stay uniquely findable.
-                with ui.row().classes('items-center no-wrap').style('gap:6px;flex-wrap:wrap;margin-bottom:14px'):
-                    icon_actions = [
-                        ('fa-solid fa-comment-dots', 'Discuss', True, theme.ACCENT,
-                         lambda _, i=aid: open_discuss(i), 'reader-discuss'),
-                    ]
-                    if art.get('source'):
-                        icon_actions.append((
-                            'fa-solid fa-arrow-up-right-from-square', 'Open original', True, theme.TEXT_MUTED,
-                            lambda _, u=art['source']: ui.navigate.to(u, new_tab=True), 'reader-open-original'))
-                    icon_actions += [
-                        ('fa-solid fa-star' if wf['favorite'] else 'fa-regular fa-star', 'Favorite',
-                         wf['favorite'], theme.AMBER, lambda _, i=aid: toggle_favorite(i), 'reader-f'),
-                        ('fa-solid fa-box-archive', 'Archive/unarchive', wf['archived'], theme.ACCENT,
-                         lambda _, i=aid: toggle_archived(i), 'reader-a'),
-                    ]
-                    for icon, tip, is_on, color, handler, mark_name in icon_actions:
-                        with ui.element('div').classes('cursor-pointer').style(
-                                'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
-                                'justify-content:center'
-                        ).on('click', handler).mark(f'row-{mark_name}-{aid}').tooltip(tip):
-                            ui.icon(icon).style(f'font-size:12.5px;color:{color if is_on else theme.TEXT_DIM}')
-
-                    if is_sending:
-                        with ui.element('div').style(
-                                'width:28px;height:28px;display:flex;align-items:center;justify-content:center'
-                        ).mark(f'reader-sending-{aid}'):
-                            ui.spinner(size='xs').style(f'color:{theme.PURPLE}')
-                    else:
-                        with ui.element('div').classes('cursor-pointer').style(
-                                'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
-                                'justify-content:center'
-                        ).on('click', lambda _, i=aid: send_to_homelab(i)).mark(
-                                f'reader-send-icon-{aid}').tooltip('Send to HomeLab'):
-                            ui.icon('fa-solid fa-arrow-up-from-bracket').style(f'font-size:12.5px;color:{theme.PURPLE}')
-
+        aid = art['id']
+        wf = _wf(aid)
+        if aid in state['confirming_ids']:
+            with ui.row().classes('items-center no-wrap').style('gap:8px;margin-bottom:14px'):
+                ui.label('Delete this article?').style(f'font-size:12.5px;color:{theme.RED};font-weight:600')
+                ui.button('Yes, delete', on_click=lambda: confirm_delete(aid)).props('dense').style(
+                    f'background:{theme.RED};color:{theme.BG};font-size:11.5px')
+                ui.button('Cancel', on_click=lambda: cancel_delete(aid)).props('flat dense').style(
+                    f'color:{theme.TEXT_MUTED};font-size:11.5px')
+        else:
+            is_sending = aid in state['sending_ids']
+            # Every action here is a small icon button now, matching the
+            # article-list row's style (Chris, 2026-08-01: felt redundant as full
+            # labeled buttons). 'Flag duplicate' was dropped entirely rather than
+            # shrunk -- duplicate detection already runs automatically at ingest
+            # (semantic/embedding dedup in homelab-intake's daemon, see
+            # services/intake.py's is_duplicate), the manual toggle only existed
+            # to correct that automatic call, and Chris decided that's not worth a
+            # dedicated control here: the "Duplicate" badge above (_badge()) still
+            # surfaces the status passively, and Delete covers the case where he
+            # actually wants a wrongly-kept duplicate gone. (The list row's own
+            # "..." overflow menu still has a manual flag/clear entry -- untouched,
+            # out of scope for this change.) Marker names are prefixed 'reader-' --
+            # the list row's own icons for this same article use unprefixed marker
+            # names and are visible on screen at the same time, so both need to
+            # stay uniquely findable.
+            with ui.row().classes('items-center no-wrap').style('gap:6px;flex-wrap:wrap;margin-bottom:14px'):
+                icon_actions = [
+                    ('fa-solid fa-comment-dots', 'Discuss', True, theme.ACCENT,
+                     lambda _, i=aid: open_discuss(i), 'reader-discuss'),
+                ]
+                if art.get('source'):
+                    icon_actions.append((
+                        'fa-solid fa-arrow-up-right-from-square', 'Open original', True, theme.TEXT_MUTED,
+                        lambda _, u=art['source']: ui.navigate.to(u, new_tab=True), 'reader-open-original'))
+                icon_actions += [
+                    ('fa-solid fa-star' if wf['favorite'] else 'fa-regular fa-star', 'Favorite',
+                     wf['favorite'], theme.AMBER, lambda _, i=aid: toggle_favorite(i), 'reader-f'),
+                    ('fa-solid fa-box-archive', 'Archive/unarchive', wf['archived'], theme.ACCENT,
+                     lambda _, i=aid: toggle_archived(i), 'reader-a'),
+                ]
+                for icon, tip, is_on, color, handler, mark_name in icon_actions:
                     with ui.element('div').classes('cursor-pointer').style(
                             'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
                             'justify-content:center'
-                    ).on('click', lambda _, i=aid: resubmit_row(i)).mark(f'reader-resubmit-{aid}').tooltip('Resubmit'):
-                        ui.icon('fa-solid fa-rotate-right').style(f'font-size:12.5px;color:{theme.ACCENT}')
+                    ).on('click', handler).mark(f'row-{mark_name}-{aid}').tooltip(tip):
+                        ui.icon(icon).style(f'font-size:12.5px;color:{color if is_on else theme.TEXT_DIM}')
 
+                if is_sending:
+                    with ui.element('div').style(
+                            'width:28px;height:28px;display:flex;align-items:center;justify-content:center'
+                    ).mark(f'reader-sending-{aid}'):
+                        ui.spinner(size='xs').style(f'color:{theme.PURPLE}')
+                else:
                     with ui.element('div').classes('cursor-pointer').style(
                             'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
                             'justify-content:center'
-                    ).on('click', lambda _, i=aid: request_delete(i)).mark(
-                            f'reader-delete-icon-{aid}').tooltip('Delete'):
-                        ui.icon('fa-solid fa-trash').style(f'font-size:12.5px;color:{theme.RED}')
+                    ).on('click', lambda _, i=aid: send_to_homelab(i)).mark(
+                            f'reader-send-icon-{aid}').tooltip('Send to HomeLab'):
+                        ui.icon('fa-solid fa-arrow-up-from-bracket').style(f'font-size:12.5px;color:{theme.PURPLE}')
+
+                with ui.element('div').classes('cursor-pointer').style(
+                        'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
+                        'justify-content:center'
+                ).on('click', lambda _, i=aid: resubmit_row(i)).mark(f'reader-resubmit-{aid}').tooltip('Resubmit'):
+                    ui.icon('fa-solid fa-rotate-right').style(f'font-size:12.5px;color:{theme.ACCENT}')
+
+                with ui.element('div').classes('cursor-pointer').style(
+                        'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
+                        'justify-content:center'
+                ).on('click', lambda _, i=aid: request_delete(i)).mark(
+                        f'reader-delete-icon-{aid}').tooltip('Delete'):
+                    ui.icon('fa-solid fa-trash').style(f'font-size:12.5px;color:{theme.RED}')
 
         if art.get('why_it_matters'):
             with ui.column().style(
@@ -1422,22 +1466,54 @@ def build():
                         'font-size:10.5px;font-weight:700;letter-spacing:0.3px')
                 ui.label(art['why_it_matters']).style('font-size:12.5px;line-height:1.5;color:#cdd1e0')
 
-        with ui.row().style(f'gap:4px;background:{theme.CARD_BG};border-radius:8px;padding:3px;'
-                             f'width:fit-content;margin-bottom:16px'):
-            for key, label in [('content', 'Content'), ('summary', 'AI Summary')]:
-                active = state['reader_tab'] == key
-                with ui.row().classes('cursor-pointer').style(
-                        f'padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;'
-                        f'background:{theme.ACCENT if active else "transparent"};'
-                        f'color:{theme.BG if active else theme.TEXT_MUTED}'
-                ).on('click', lambda _, k=key: set_reader_tab(k)):
-                    ui.label(label)
+        # Three stacked sections replace the old Content/AI Summary tab toggle
+        # (Chris, 2026-08-02: wanted summary, analysis, and the real article text all
+        # scrollable on one screen instead of flipping tabs).
 
-        if state['reader_tab'] == 'content':
-            ui.markdown(data['content']).classes('nq-markdown').style('margin-bottom:20px')
-        else:
-            ui.markdown(data.get('summary') or 'No AI summary available.').classes('nq-markdown').style(
-                f'background:{theme.CARD_BG};border-radius:10px;padding:14px 16px;margin-bottom:20px')
+        def _section_header(label):
+            with ui.row().classes('items-center no-wrap').style('gap:8px;width:100%;margin:4px 0 8px'):
+                ui.label(label).style(
+                    f'font-size:10.5px;font-weight:700;letter-spacing:0.5px;color:{theme.TEXT_DIM};'
+                    f'white-space:nowrap')
+                ui.element('div').style('flex:1;height:1px;background:rgba(255,255,255,0.06)')
+
+        _section_header('SUMMARY')
+        # data['summary'] is the ## Summary section; articles whose body has no
+        # parseable summary heading (odd legacy files) fall back to the whole stored body
+        ui.markdown(data.get('summary') or data['content']).classes('nq-markdown').style(
+            f'background:{theme.CARD_BG};border-radius:10px;padding:14px 16px;margin-bottom:18px')
+
+        if data.get('analysis'):
+            _section_header('APPLICATION ANALYSIS')
+            ui.markdown(data['analysis']).classes('nq-markdown').style(
+                f'background:rgba(165,180,252,0.05);border:1px solid rgba(165,180,252,0.14);'
+                f'border-radius:10px;padding:14px 16px;margin-bottom:18px')
+
+        _section_header('FULL ARTICLE')
+        ft = state['fulltext']
+        if not art.get('source'):
+            ui.label('No source URL on this article — nothing to fetch.').style(
+                f'font-size:12px;color:{theme.TEXT_DIM};margin-bottom:20px')
+        elif ft['status'] == 'ready' and ft['text']:
+            ui.markdown(ft['text']).classes('nq-markdown').style('margin-bottom:20px')
+        elif ft['status'] == 'failed':
+            with ui.column().style(
+                    'background:rgba(249,201,124,0.06);border:1px solid rgba(249,201,124,0.2);'
+                    'border-radius:10px;padding:12px 14px;margin-bottom:20px;gap:8px;max-width:640px'):
+                ui.label("Couldn't fetch the full article (paywall, dead link, or the site "
+                          'blocked the request).').style(f'font-size:12px;color:{theme.TEXT_MUTED}')
+                with ui.row().classes('items-center no-wrap').style('gap:12px'):
+                    ui.label('Retry').classes('cursor-pointer').style(
+                        f'font-size:11.5px;font-weight:600;color:{theme.ACCENT}').on(
+                        'click', lambda: retry_full_text()).mark('fulltext-retry')
+                    ui.label('Open original ↗').classes('cursor-pointer').style(
+                        f'font-size:11.5px;font-weight:600;color:{theme.TEXT_MUTED}').on(
+                        'click', lambda u=art['source']: ui.navigate.to(u, new_tab=True))
+        else:  # 'idle' (kickoff pending) or 'loading' -- both mean a fetch is on its way
+            with ui.row().classes('items-center no-wrap').style('gap:8px;margin-bottom:20px'):
+                ui.spinner(size='sm').style(f'color:{theme.ACCENT}')
+                ui.label(f'Fetching full article from {_short_url(art["source"])}…').style(
+                    f'font-size:12px;color:{theme.TEXT_DIM}')
 
     @ui.refreshable
     def render_reader():
@@ -1491,10 +1567,16 @@ def build():
                     f'font-size:13px;color:{theme.TEXT_DIM}').on('click', lambda: close_reader()).tooltip('Close')
 
             if state['reader_mode'] == 'discuss':
-                with ui.row().style('flex:1;min-height:0;width:100%;gap:0'):
+                # height:100% on the article pane is load-bearing: NiceGUI rows default
+                # to align-items:flex-start (nicegui.css), so without it the pane sizes
+                # to its full content height instead of the row -- its overflow:auto
+                # then never engages, the page itself grows/scrolls, and the chat column
+                # stays anchored at the article's top instead of staying in view
+                # (hit live 2026-08-02, with the full-text section making articles long).
+                with ui.row().classes('no-wrap').style('flex:1;min-height:0;width:100%;gap:0'):
                     with ui.column().classes('nq-custom-scroll').style(
-                            'flex:1;overflow:auto;padding:18px 24px;min-width:0'):
-                        _reader_content_block(art, data, show_actions=False)
+                            'flex:1;height:100%;overflow:auto;padding:18px 24px;min-width:0'):
+                        _reader_content_block(art, data)
                     with ui.column().style(f'width:520px;flex:none;border-left:1px solid {theme.BORDER};height:100%'):
                         discuss_panel.build(
                             art, state['discuss'], on_send=lambda t: discuss_send(t),
@@ -1506,7 +1588,7 @@ def build():
                 return
 
             with ui.column().classes('nq-custom-scroll').style('flex:1;overflow:auto;padding:20px 28px;min-width:0'):
-                _reader_content_block(art, data, show_actions=True)
+                _reader_content_block(art, data)
 
     # ---------- layout ----------
     #

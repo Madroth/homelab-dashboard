@@ -14,6 +14,8 @@ from nicegui import ui
 from nicegui.testing import User
 
 from pages import intake as intake_page
+from services import fulltext as fulltext_service
+from services.ai import discuss as discuss_service
 from services import intake as intake_service
 from services import intake_state
 from services import plane as plane_service
@@ -187,6 +189,16 @@ def isolated_intake(tmp_path, monkeypatch):
         return True, None
 
     monkeypatch.setattr(plane_service, 'send_article_to_plane', _delayed_send)
+
+    # Full-text fetch must never hit the network in tests -- the seeded articles carry
+    # example.com source URLs precisely so a missing stub here fails loudly (slow test +
+    # 'failed' section) rather than silently fetching something real.
+    monkeypatch.setattr(fulltext_service, 'CACHE_DIR', str(tmp_path / 'fulltext_cache'))
+    monkeypatch.setattr(fulltext_service, 'fetch_and_cache',
+                         lambda aid, url: f'Stub full text for {aid}')
+
+    monkeypatch.setattr(discuss_service, 'send_discuss_message',
+                         lambda *a, **kw: {'text': 'Stubbed discuss reply.', 'tool_calls': []})
 
     return {'tmp_path': tmp_path, 'state_file': state_file}
 
@@ -414,6 +426,26 @@ async def test_discuss_mode_opens_and_repo_scope_popover(user: User, isolated_in
 
 
 @pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_reader_action_row_stays_visible_in_discuss_mode(user: User, isolated_intake):
+    """The reader's action icon row (Discuss/favorite/archive/send/delete/...) used to be
+    hidden in Discuss mode (_reader_content_block's show_actions=False branch); Chris asked
+    2026-08-04 for it to stay visible alongside the chat."""
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    aid = '2026-07-30-235959-new-article.md'
+
+    user.find(marker=f'article-row-{aid}').click()
+    await asyncio.sleep(0.2)
+    user.find(marker='reader-mode-discuss').click()
+    await asyncio.sleep(0.3)
+
+    await user.should_see('This article')  # discuss panel is open
+    for mark in (f'row-reader-f-{aid}', f'row-reader-a-{aid}',
+                 f'reader-send-icon-{aid}', f'reader-delete-icon-{aid}'):
+        user.find(marker=mark)  # raises if the action icon is missing
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
 async def test_read_toggle_still_reorders_under_unread_sort(user: User, isolated_intake):
     """The single-row-refresh optimization for toggle_read/toggle_favorite/toggle_archived
     (added 2026-08-01 after a reported 1s+ delay on every toggle -- render_articles.refresh()
@@ -458,3 +490,83 @@ async def test_favorite_toggle_removes_row_from_favorites_folder(user: User, iso
     user.find(marker=f'row-f-{aid}').click()  # unfavorite while inside Favorites
     await asyncio.sleep(0.2)
     await user.should_not_see('New Article')
+
+
+# ---------- 2026-08-02: three-section reader (summary / analysis / full text) ----------
+
+def test_get_article_splits_summary_and_analysis(tmp_path, monkeypatch):
+    monkeypatch.setattr(intake_service, 'ARTICLES_DIR', str(tmp_path))
+    (tmp_path / 'a.md').write_text(textwrap.dedent("""\
+        ---
+        title: X
+        ---
+
+        ## Summary
+
+        The summary text.
+
+        ## Application Analysis
+
+        The analysis text.
+        """), encoding='utf-8')
+    data = intake_service.get_article('a.md')
+    assert data['summary'] == 'The summary text.'
+    assert data['analysis'] == 'The analysis text.'
+    # summary-only articles must yield an empty analysis, not leak the summary into it
+    (tmp_path / 'b.md').write_text('---\ntitle: Y\n---\n\n## Summary\n\nOnly summary.\n',
+                                    encoding='utf-8')
+    data = intake_service.get_article('b.md')
+    assert data['summary'] == 'Only summary.'
+    assert data['analysis'] == ''
+
+
+def test_fulltext_fetch_caches_and_get_cached_round_trips(tmp_path, monkeypatch):
+    monkeypatch.setattr(fulltext_service, 'CACHE_DIR', str(tmp_path / 'cache'))
+    monkeypatch.setattr(fulltext_service.trafilatura, 'fetch_url', lambda url: '<html>page</html>')
+    monkeypatch.setattr(fulltext_service.trafilatura, 'extract',
+                         lambda downloaded, **kw: 'Extracted body text.')
+    aid = '2026-01-01-000000-x.md'
+    assert fulltext_service.get_cached(aid) is None
+    assert fulltext_service.fetch_and_cache(aid, 'https://example.com/x') == 'Extracted body text.'
+    assert fulltext_service.get_cached(aid) == 'Extracted body text.'
+    # a failed fetch must return None and must NOT poison the cache
+    monkeypatch.setattr(fulltext_service.trafilatura, 'fetch_url', lambda url: None)
+    assert fulltext_service.fetch_and_cache('other.md', 'https://example.com/y') is None
+    assert fulltext_service.get_cached('other.md') is None
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_reader_shows_summary_and_full_text_sections(user: User, isolated_intake):
+    """The reader now stacks SUMMARY and FULL ARTICLE (plus APPLICATION ANALYSIS when
+    present) instead of the old Content/AI Summary tabs -- opening an article must show
+    the seeded summary AND the (stubbed) fetched full text with no tab clicking."""
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    aid = '2026-07-30-235959-new-article.md'
+    user.find(marker=f'article-row-{aid}').click()
+    await user.should_see('Test summary for New Article', retries=20)
+    await user.should_see(f'Stub full text for {aid}', retries=20)
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_discuss_reply_renders_after_send(user: User, isolated_intake):
+    """Caught live 2026-08-02: discuss_send checked client_alive() WITHOUT a captured
+    client after its own render_reader.refresh() had torn down the Discuss input's
+    slot, so every reply was silently dropped and the busy spinner stuck on
+    '... is reading ...' forever. This drives the real click path: open Discuss, click
+    a suggested prompt, and require the (stubbed) assistant reply to actually render
+    -- it fails if the stale-slot guard regresses."""
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    aid = '2026-07-30-235959-new-article.md'
+    user.find(marker=f'article-row-{aid}').click()
+    # 'Test summary...' also matches the list row's snippet, so it can't prove the
+    # reader opened; the stubbed full text renders ONLY inside the reader -- waiting
+    # on it gives the async select_article() time to finish before find() (no retry)
+    # goes looking for the reader's Discuss toggle.
+    await user.should_see(f'Stub full text for {aid}', retries=20)
+    user.find(marker='reader-mode-discuss').click()
+    await user.should_see('Summarize the key takeaway', retries=20)
+    # click the pill row by marker -- its label has no listener and clicks don't bubble
+    user.find(marker='discuss-prompt-0').click()
+    await user.should_see('Stubbed discuss reply.', retries=30)

@@ -128,7 +128,9 @@ deliberately rather than just in passing.
       straight back to the list+reader layout
 - [ ] Use the prev/next chevrons in the reader header — moves to the adjacent
       article in your current filtered/sorted list, and the "N of M" counter updates
-- [ ] Content / AI Summary tabs both render something
+- [ ] ~~Content / AI Summary tabs both render something~~ REPLACED 2026-08-02: reader
+      now stacks SUMMARY / APPLICATION ANALYSIS / FULL ARTICLE sections — see
+      `INTAKE_FEATURE_CHECKLIST.md` §8 for the current checks
 - [ ] "Why it matters" callout shows when the article has one
 - [ ] Reader's own action row (Discuss, Open original, Favorite, Send to HomeLab,
       Archive, Flag duplicate, Resubmit, Delete) — spot check a couple, especially

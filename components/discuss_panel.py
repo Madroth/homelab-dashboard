@@ -95,8 +95,12 @@ def build(article: dict, discuss_state: dict, on_send: Callable[[str], None],
     thread = discuss_state['thread']
 
     with ui.column().style('width:100%;height:100%;background:#1b1b28;gap:0'):
+        # align-self:stretch / width:100% throughout: the panel column doesn't stretch
+        # its children (NiceGUI default), so any row missing this shrinks to content
+        # width and clusters at the left edge (hit live 2026-08-02 on the input row).
         with ui.row().style(
-                f'gap:3px;background:{theme.CARD_BG};border-radius:9px;padding:3px;margin:12px 16px 0'):
+                f'gap:3px;background:{theme.CARD_BG};border-radius:9px;padding:3px;margin:12px 16px 0;'
+                f'align-self:stretch'):
             for key, label, color in MODELS:
                 is_active = key == discuss_state['model']
                 with ui.row().classes('items-center justify-center cursor-pointer').style(
@@ -115,7 +119,7 @@ def build(article: dict, discuss_state: dict, on_send: Callable[[str], None],
             ('repo', REPO_LABEL, f"{repo_count} files", False),
             ('archive', 'Article archive', f"{archive_count} saved", False),
         ]
-        with ui.row().style('gap:6px;flex-wrap:wrap;padding:10px 16px 4px'):
+        with ui.row().style('gap:6px;flex-wrap:wrap;padding:10px 16px 4px;width:100%'):
             for key, label, meta, locked in chips:
                 is_on = key in active
                 with ui.element('div').style('position:relative'):
@@ -160,16 +164,17 @@ def build(article: dict, discuss_state: dict, on_send: Callable[[str], None],
         ui.label(f"{REPO_LABEL} read on request · {archive_count} articles in archive").style(
             f'font-size:10px;color:{theme.TEXT_DIM};padding:0 16px 8px')
 
-        with ui.column().classes('nq-custom-scroll').style('flex:1;overflow-y:auto;padding:8px 16px;gap:14px'):
+        with ui.column().classes('nq-custom-scroll').style(
+                'flex:1;overflow-y:auto;padding:8px 16px;gap:14px;width:100%'):
             if not thread:
                 ui.label("No messages yet — try one of these, or ask your own question.").style(
                     f'font-size:12px;color:{theme.TEXT_DIM};margin-bottom:6px')
                 with ui.row().style('gap:6px;flex-wrap:wrap'):
-                    for p in _suggested_prompts(article):
+                    for i, p in enumerate(_suggested_prompts(article)):
                         with ui.row().classes('cursor-pointer').style(
                                 f'font-size:11px;color:#c2c6d6;background:{theme.CARD_BG};'
                                 f'border:1px solid rgba(255,255,255,0.07);border-radius:16px;padding:6px 11px'
-                        ).on('click', lambda _, t=p: on_send(t)):
+                        ).on('click', lambda _, t=p: on_send(t)).mark(f'discuss-prompt-{i}'):
                             ui.label(p)
             for msg in thread:
                 _render_message(msg, on_open_citation)
@@ -180,9 +185,9 @@ def build(article: dict, discuss_state: dict, on_send: Callable[[str], None],
                     ui.label(_thinking_line(model_label, active)).style('font-size:12px')
 
         with ui.row().classes('items-center no-wrap').style(
-                'padding:10px 16px;border-top:1px solid rgba(255,255,255,0.06);gap:8px'):
+                'padding:10px 16px;border-top:1px solid rgba(255,255,255,0.06);gap:8px;width:100%'):
             draft_input = ui.input(placeholder=discuss.placeholder_text(active)).props('borderless dense').style(
-                f'flex:1;background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.07);'
+                f'flex:1;min-width:0;background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.07);'
                 f'border-radius:7px;padding:6px 10px;color:{theme.TEXT};font-size:12.5px')
             send_btn = ui.element('div').classes('cursor-pointer').style(
                 f'width:32px;height:32px;border-radius:8px;background:{theme.ACCENT};color:{theme.BG};'
@@ -193,7 +198,7 @@ def build(article: dict, discuss_state: dict, on_send: Callable[[str], None],
             draft_input.on('keydown.enter', lambda: on_send(draft_input.value))
 
         model_label = next(l for k, l, _ in MODELS if k == discuss_state['model'])
-        with ui.row().classes('items-center justify-between no-wrap').style('padding:0 16px 10px'):
+        with ui.row().classes('items-center justify-between no-wrap').style('padding:0 16px 10px;width:100%'):
             ui.label(discuss.grounding_footer(active, model_label)).style(f'font-size:10px;color:{theme.TEXT_DIM}')
             if thread:
                 with ui.row().classes('cursor-pointer').on('click', lambda: on_clear_thread()):

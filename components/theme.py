@@ -33,6 +33,9 @@ html, body {{ margin:0; padding:0; height:100%; overflow:hidden; background:{BG}
 @keyframes omegaPulseAmber {{ 0%{{box-shadow:0 0 0 0 rgba(249,201,124,.5)}} 70%{{box-shadow:0 0 0 6px rgba(249,201,124,0)}} 100%{{box-shadow:0 0 0 0 rgba(249,201,124,0)}} }}
 @keyframes omegaSkel {{ 0%{{opacity:.5}} 50%{{opacity:1}} 100%{{opacity:.5}} }}
 .nq-skel {{ animation: omegaSkel 1.4s ease-in-out infinite; }}
+/* Full-viewport app: NiceGUI's default 1rem page padding would push the 100vh shell
+   row past the viewport and leave the page permanently scrollable by ~2rem. */
+.nicegui-content {{ padding: 0; }}
 .nq-markdown {{ font-size:13.5px; line-height:1.7; color:#c2c6d6; }}
 .nq-markdown h1, .nq-markdown h2, .nq-markdown h3 {{ color:{TEXT}; margin-top:1.2em; margin-bottom:0.5em; }}
 .nq-markdown a {{ color:{ACCENT}; text-decoration:none; }}

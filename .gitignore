@@ -6,3 +6,5 @@ settings.json
 intake_state.json
 intake_state.json.lock
 intake_conversations.json
+fulltext_cache/
+intake_conversations.json.lock

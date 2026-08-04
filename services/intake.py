@@ -176,9 +176,10 @@ def get_article(filename: str) -> dict | None:
     meta, body = _parse_frontmatter(content)
     if meta is not None:
         summary = _full_summary_from_body(body, r'## Summary\n\n(.*?)(?:\n##(?!#)|$)')
-        return {'content': body.strip(), 'summary': summary}
+        analysis = _full_summary_from_body(body, r'## Application Analysis\n+(.*?)(?:\n##(?!#)|$)')
+        return {'content': body.strip(), 'summary': summary, 'analysis': analysis}
     summary = _full_summary_from_body(content, r'## Local AI Summary[^\n]*\n(.*?)(?:\n##(?!#)|$)')
-    return {'content': content, 'summary': summary}
+    return {'content': content, 'summary': summary, 'analysis': ''}
 
 
 def delete_article(filename: str) -> bool:
