@@ -20,6 +20,7 @@ CONVERSATIONS_FILE = os.path.expanduser('~/projects/homelab-dashboard/intake_con
 _DEFAULT_ARTICLE_STATE = {'read': False, 'favorite': False, 'archived': False}
 _DEFAULT_STATE = {'articles': {}, 'folders': [], 'prefs': {'density': 'cozy', 'sort': 'unread'}}
 _DEFAULT_SOURCES = {'archive': True, 'repos': []}
+DEFAULT_MODEL = 'claude'  # per-article picks (see get_model/set_model) override this
 
 
 @contextlib.contextmanager
@@ -143,10 +144,11 @@ def set_prefs(**fields) -> None:
 
 def _normalize_conversation(entry) -> dict:
     if isinstance(entry, list):
-        return {'messages': entry, 'sources': dict(_DEFAULT_SOURCES)}
+        return {'messages': entry, 'sources': dict(_DEFAULT_SOURCES), 'model': None}
     entry = dict(entry)
     entry.setdefault('messages', [])
     entry.setdefault('sources', dict(_DEFAULT_SOURCES))
+    entry.setdefault('model', None)  # None -> DEFAULT_MODEL (no explicit pick yet)
     return entry
 
 
@@ -171,10 +173,15 @@ def append_message(article_id: str, message: dict) -> None:
 
 
 def clear_thread(article_id: str) -> None:
+    """Empties the article's messages but keeps its model pick and source toggles --
+    'Clear' means start the conversation over, not re-do the setup choices
+    (Chris, 2026-08-04: model/sources must stay stuck to the article)."""
     with _file_lock(CONVERSATIONS_FILE):
         convos = _load_conversations()
         if article_id in convos:
-            del convos[article_id]
+            entry = _normalize_conversation(convos[article_id])
+            entry['messages'] = []
+            convos[article_id] = entry
             _atomic_write(CONVERSATIONS_FILE, convos)
 
 
@@ -196,5 +203,21 @@ def set_sources(article_id: str, **fields) -> None:
         convos = _load_conversations()
         entry = _normalize_conversation(convos.get(article_id, {}))
         entry['sources'].update(fields)
+        convos[article_id] = entry
+        _atomic_write(CONVERSATIONS_FILE, convos)
+
+
+def get_model(article_id: str) -> str:
+    convos = _load_conversations()
+    if article_id not in convos:
+        return DEFAULT_MODEL
+    return _normalize_conversation(convos[article_id])['model'] or DEFAULT_MODEL
+
+
+def set_model(article_id: str, model: str) -> None:
+    with _file_lock(CONVERSATIONS_FILE):
+        convos = _load_conversations()
+        entry = _normalize_conversation(convos.get(article_id, {}))
+        entry['model'] = model
         convos[article_id] = entry
         _atomic_write(CONVERSATIONS_FILE, convos)

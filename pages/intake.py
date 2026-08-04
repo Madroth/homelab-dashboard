@@ -118,7 +118,7 @@ def build():
         # 'idle' -> no source URL (never fetchable); 'loading' -> fetch in flight;
         # 'ready' -> text populated; 'failed' -> fetch failed, retry offered
         'fulltext': {'status': 'idle', 'text': None},
-        'discuss': {'model': 'claude', 'active_sources': {'article', 'archive'},
+        'discuss': {'model': intake_state.DEFAULT_MODEL, 'active_sources': {'article', 'archive'},
                      'repo_scope_open': False, 'thread': [], 'busy': False},
         'focused_id': None, 'articles_loaded': False, 'sending_ids': set(), 'confirming_ids': set(),
         'thread_counts': {},
@@ -552,7 +552,9 @@ def build():
             aid = state['selected']
             thread = await run.io_bound(intake_state.get_thread, aid)
             sources = await run.io_bound(intake_state.get_sources, aid)
+            model = await run.io_bound(intake_state.get_model, aid)
             state['discuss']['thread'] = thread if thread is not None else []
+            state['discuss']['model'] = model or intake_state.DEFAULT_MODEL
             active = {'article'}
             if sources is None or sources.get('archive', True):
                 active.add('archive')
@@ -720,9 +722,17 @@ def build():
         state['discuss']['repo_scope_open'] = False
         render_reader.refresh()
 
-    def discuss_select_model(model):
+    async def discuss_select_model(model):
+        aid = state['selected']
         state['discuss']['model'] = model
         render_reader.refresh()
+        # Persisted per article (Chris, 2026-08-04): each article's Discuss keeps its
+        # own model pick, so switching articles never silently changes which model
+        # answers. Persist AFTER the refresh -- refresh tears down this handler's
+        # originating slot, and nothing below touches UI context, so order matters
+        # only for snappiness.
+        if aid:
+            await run.io_bound(intake_state.set_model, aid, model)
 
     async def discuss_clear_thread():
         aid = state['selected']
@@ -1536,7 +1546,7 @@ def build():
                     # text label, not just a small icon, so it's easy to find (live
                     # testing showed the icon-only version was easy to miss entirely).
                     with ui.row().classes('items-center no-wrap cursor-pointer').style(
-                            f'gap:5px').on('click', lambda: reset_reader_size()):
+                            f'gap:5px').on('click', lambda: reset_reader_size()).mark('reader-show-list'):
                         ui.icon('fa-solid fa-compress').style(f'font-size:11px;color:{theme.ACCENT}')
                         ui.label('Show list').style(f'font-size:11.5px;font-weight:600;color:{theme.ACCENT}')
                 else:

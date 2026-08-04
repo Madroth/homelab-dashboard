@@ -445,6 +445,66 @@ async def test_reader_action_row_stays_visible_in_discuss_mode(user: User, isola
         user.find(marker=mark)  # raises if the action icon is missing
 
 
+def test_model_pick_persists_per_article_and_survives_clear(tmp_path, monkeypatch):
+    """Each article's Discuss model choice is saved with its conversation entry
+    (Chris, 2026-08-04): unpicked articles fall back to DEFAULT_MODEL, picks stick
+    per article, and 'Clear' empties messages WITHOUT resetting model or sources."""
+    convos_file = tmp_path / 'convos.json'
+    monkeypatch.setattr(intake_state, 'CONVERSATIONS_FILE', str(convos_file))
+
+    assert intake_state.get_model('a.md') == intake_state.DEFAULT_MODEL
+    intake_state.set_model('a.md', 'local')
+    assert intake_state.get_model('a.md') == 'local'
+    assert intake_state.get_model('b.md') == intake_state.DEFAULT_MODEL  # untouched article
+
+    intake_state.append_message('a.md', {'role': 'user', 'text': 'hi'})
+    intake_state.set_sources('a.md', repos=['homelab-infra'])
+    intake_state.clear_thread('a.md')
+    assert intake_state.get_thread('a.md') == []
+    assert intake_state.get_model('a.md') == 'local'
+    assert intake_state.get_sources('a.md')['repos'] == ['homelab-infra']
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_discuss_model_pick_is_per_article(user: User, isolated_intake):
+    """Switching articles must restore each article's own saved model pick instead of
+    carrying over whatever was selected last (the picker used to be global state)."""
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    new_aid = '2026-07-30-235959-new-article.md'
+    old_aid = '2026-01-01-120000-old-article.md'
+
+    user.find(marker=f'article-row-{new_aid}').click()
+    await user.should_see('Test summary for New Article', retries=20)
+    await asyncio.sleep(0.3)  # let load_article_content's render_reader.refresh() land
+    user.find(marker='reader-mode-discuss').click()
+    await asyncio.sleep(0.3)
+    await user.should_see('Claude · grounded')  # default before any pick
+
+    user.find(marker='discuss-model-local').click()
+    await asyncio.sleep(0.3)
+    await user.should_see('Local · grounded')
+
+    user.find(marker='reader-show-list').click()  # discuss forces full width; unhide the list
+    await asyncio.sleep(0.2)
+    user.find(marker=f'article-row-{old_aid}').click()
+    await user.should_see('Test summary for Old Article', retries=20)
+    await asyncio.sleep(0.3)  # let load_article_content's render_reader.refresh() land
+    user.find(marker='reader-mode-discuss').click()
+    await asyncio.sleep(0.3)
+    await user.should_see('Claude · grounded')  # old article never picked -> default
+    await user.should_not_see('Local · grounded')
+
+    user.find(marker='reader-show-list').click()
+    await asyncio.sleep(0.2)
+    user.find(marker=f'article-row-{new_aid}').click()
+    await user.should_see('Test summary for New Article', retries=20)
+    await asyncio.sleep(0.3)  # let load_article_content's render_reader.refresh() land
+    user.find(marker='reader-mode-discuss').click()
+    await asyncio.sleep(0.3)
+    await user.should_see('Local · grounded')  # first article's pick was remembered
+
+
 @pytest.mark.nicegui_main_file('test_intake_fixes.py')
 async def test_read_toggle_still_reorders_under_unread_sort(user: User, isolated_intake):
     """The single-row-refresh optimization for toggle_read/toggle_favorite/toggle_archived

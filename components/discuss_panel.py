@@ -107,7 +107,7 @@ def build(article: dict, discuss_state: dict, on_send: Callable[[str], None],
                         f'flex:1;padding:6px 0;border-radius:6px;font-size:11.5px;font-weight:600;'
                         f'background:{theme.ACCENT_TINT if is_active else "transparent"};'
                         f'color:{color if is_active else theme.TEXT_MUTED}'
-                ).on('click', lambda _, k=key: on_select_model(k)):
+                ).on('click', lambda _, k=key: on_select_model(k)).mark(f'discuss-model-{key}'):
                     ui.label(label)
 
         archive_count = len(intake.list_articles())
