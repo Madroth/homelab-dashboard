@@ -24,11 +24,19 @@ def get_status() -> dict:
     status = {'defcon': [], 'containers': [], 'disk': {}, 'memory': {}}
 
     try:
-        total, used, free = shutil.disk_usage('/mnt/Multimedia')
-        free_pct = (free / total) * 100
-        status['disk'] = {'total': total, 'used': used, 'free': free, 'free_pct': free_pct}
-        if free_pct < 5.0:
-            status['defcon'].append('STORAGE_CRITICAL: /mnt/Multimedia is below 5% free space!')
+        # Check the mount before reading it. /mnt/Multimedia exists as a plain
+        # directory when the NAS is unmounted, so disk_usage() would silently
+        # report the root SSD's free space as if it were the NAS -- a failed
+        # mount showed up here as a healthy number for three days.
+        if not os.path.ismount('/mnt/Multimedia'):
+            status['disk'] = {'error': '/mnt/Multimedia is NOT MOUNTED'}
+            status['defcon'].append('MOUNT_DOWN: /mnt/Multimedia is not mounted — the NAS is unreachable!')
+        else:
+            total, used, free = shutil.disk_usage('/mnt/Multimedia')
+            free_pct = (free / total) * 100
+            status['disk'] = {'total': total, 'used': used, 'free': free, 'free_pct': free_pct}
+            if free_pct < 5.0:
+                status['defcon'].append('STORAGE_CRITICAL: /mnt/Multimedia is below 5% free space!')
     except Exception:
         status['disk'] = {'error': 'Could not read /mnt/Multimedia'}
 

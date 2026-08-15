@@ -67,6 +67,9 @@ def build():
                     color = theme.RED if disk.get('free_pct', 100) < 10 else theme.TEXT
                     ui.label(f'{free_gb:.1f} GB Free').style(f'font-size:20px;font-weight:700;color:{color}')
                     ui.label(f'Out of {total_gb:.1f} GB Total').style(f'font-size:11.5px;color:{theme.TEXT_MUTED}')
+                elif disk.get('error'):
+                    ui.label('NOT MOUNTED').style(f'font-size:20px;font-weight:700;color:{theme.RED}')
+                    ui.label(disk['error']).style(f'font-size:11.5px;color:{theme.TEXT_MUTED}')
                 else:
                     ui.label('Unavailable').style(f'font-size:20px;font-weight:700;color:{theme.TEXT}')
 
