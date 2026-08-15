@@ -36,22 +36,57 @@ STATUS_ENTRIES = [
     ('archived', 'fa-solid fa-box-archive', 'Archived'),
 ]
 
-# Sub-topic display names for the Education view. Keys are homelab-intake's primary_domain
-# enum (docs/DESIGN.md §5) -- deliberately reusing that taxonomy rather than inventing a
-# second one, so an article's sub-topic here and its domain everywhere else can't disagree.
-DOMAIN_LABELS = {
-    'ai-llms': 'AI & LLMs',
-    'homelab': 'Homelab & Self-hosting',
-    'ai-pm-career': 'AI / PM Career',
-    'gym-business': 'Gym & Business',
-    'hardware': 'Hardware',
-    'dev': 'Software Development',
-    'other': 'Other',
-}
+def _tag_frequencies(articles: list[dict]) -> dict:
+    """How often each tag appears across the whole archive -- the weight used to pick an
+    article's sub-topic."""
+    counts: dict[str, int] = {}
+    for a in articles:
+        for t in a.get('tags') or []:
+            counts[t] = counts.get(t, 0) + 1
+    return counts
 
 
-def _subtopic_label(domain: str) -> str:
-    return DOMAIN_LABELS.get(domain or '', 'Uncategorized')
+def _subtopic_of(article: dict, freqs: dict) -> str:
+    """An article's sub-topic heading: whichever of its tags is most used across the archive.
+
+    `primary_domain` used to supply this — a single-valued enum, so every article had exactly
+    one home for free. Tags are multi-valued and can't give that on their own, so the single
+    home is recovered by a rule instead of a field: most-common tag wins, alphabetical to
+    break ties so the grouping is stable between renders rather than dependent on tag order.
+    Articles with no tags fall through to a catch-all rather than vanishing from the view."""
+    tags = article.get('tags') or []
+    if not tags:
+        return 'Other'
+    return sorted(tags, key=lambda t: (-freqs.get(t, 0), t))[0]
+
+
+OTHER_SUBTOPIC = 'Other'
+
+
+def _group_by_subtopic(articles: list[dict], freqs: dict, min_group: int = 2) -> list[tuple]:
+    """Returns [(heading, items)] largest-first, with `Other` always last.
+
+    Groups smaller than `min_group` are folded into `Other`. Without that fold the archive's
+    tag distribution produces a heading per article -- measured on the real corpus, grouping
+    23 educational articles by top tag gave 16 headings, 13 holding a single item, which is
+    less navigable than no grouping at all. A minimum group size targets that directly and
+    self-heals: as the archive grows and the vocabulary consolidates, real groups clear the
+    bar on their own and `Other` shrinks without anyone tuning a threshold."""
+    buckets: dict[str, list] = {}
+    for a in articles:
+        buckets.setdefault(_subtopic_of(a, freqs), []).append(a)
+
+    named, other = [], list(buckets.pop(OTHER_SUBTOPIC, []))
+    for heading, items in buckets.items():
+        if len(items) >= min_group:
+            named.append((heading, items))
+        else:
+            other.extend(items)
+
+    named.sort(key=lambda pair: (-len(pair[1]), pair[0]))
+    if other:
+        named.append((OTHER_SUBTOPIC, other))
+    return named
 
 _FILENAME_TS_RE = re.compile(r'^(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})')
 
@@ -128,6 +163,8 @@ async def _show_cheatsheet():
 def build():
     state = {
         'articles': [], 'queue': [], 'workflow': {}, 'folders': [],
+        # homelab-intake's controlled vocabulary, backing the tag editor's search box.
+        'tag_vocabulary': [],
         'prefs': {'density': 'cozy', 'sort': 'unread'},
         'folder': 'all', 'tag_filters': set(), 'tag_search': '', 'search': '',
         'select_mode': False, 'selected_ids': set(),
@@ -881,6 +918,9 @@ def build():
             return
         state['articles'] = arts
         state['articles_loaded'] = True
+        vocab = await run.io_bound(intake.load_tag_vocabulary)
+        if vocab is not None:
+            state['tag_vocabulary'] = vocab
         if client_alive():
             render_folder_dropdown.refresh()
             render_tag_dropdown.refresh()
@@ -1199,17 +1239,13 @@ def build():
         single-row refresh never touches them. That's safe because any change that moves an
         article between groups also changes filtered_articles()' id list, which
         _refresh_after_workflow_change() already detects and answers with a full rebuild."""
-        groups: dict[str, list] = {}
-        for a in arts:
-            groups.setdefault(a.get('primary_domain') or '', []).append(a)
-
-        # Biggest sub-topic first, alphabetical by display label to break ties, so the
-        # order is stable across renders rather than dict-insertion dependent.
-        for domain in sorted(groups, key=lambda d: (-len(groups[d]), _subtopic_label(d))):
-            items = groups[domain]
+        # Frequencies come from the WHOLE archive, not just the educational subset, so a
+        # sub-topic heading means the same thing here as the tag does everywhere else.
+        freqs = _tag_frequencies(state['articles'])
+        for subtopic, items in _group_by_subtopic(arts, freqs):
             with ui.row().classes('items-center no-wrap').style(
                     'width:100%;gap:8px;padding:14px 2px 5px'):
-                ui.label(_subtopic_label(domain).upper()).style(
+                ui.label(subtopic.upper()).style(
                     f'font-size:9.5px;font-weight:700;letter-spacing:0.6px;color:{theme.TEXT_DIM};'
                     f'flex:none;white-space:nowrap')
                 ui.element('div').style(
@@ -1433,6 +1469,108 @@ def build():
             await run.io_bound(intake.retry_queue_item, item['id'])
         await reload_queue()
 
+    # ---------- rendering: tag editor ----------
+
+    async def _after_tag_change(aid):
+        """Tags feed the tag dropdown, the Education view's sub-topic grouping, and tag
+        filtering, so a change has to reload the article list rather than just repaint the
+        chips. reload_articles() already refreshes those surfaces and guards a dead client."""
+        await reload_articles()
+        if client_alive():
+            render_tag_editor.refresh()
+
+    async def add_tag_to_article(aid, tag, promote=False):
+        tag = (tag or '').strip()
+        if not tag:
+            return
+        if promote:
+            # Accepting a suggestion is the approval step the vocabulary was missing: it
+            # teaches the pipeline to auto-apply this tag on future articles instead of
+            # re-proposing it every time.
+            await run.io_bound(intake.promote_tag, tag)
+        ok = await run.io_bound(intake.add_tag, aid, tag)
+        if ok is None:
+            return
+        await _after_tag_change(aid)
+
+    async def remove_tag_from_article(aid, tag):
+        if await run.io_bound(intake.remove_tag, aid, tag) is None:
+            return
+        await _after_tag_change(aid)
+
+    async def dismiss_suggestion(aid, tag):
+        if await run.io_bound(intake.dismiss_suggested_tag, aid, tag) is None:
+            return
+        await _after_tag_change(aid)
+
+    @ui.refreshable
+    def render_tag_editor(art: dict):
+        aid = art['id']
+        # Read tags from state rather than the `art` dict passed in: `art` is a snapshot
+        # captured when the reader rendered, so after an add/remove it is stale.
+        current = next((a for a in state['articles'] if a['id'] == aid), art)
+        tags = current.get('tags') or []
+        suggested = current.get('suggested_tags') or []
+
+        with ui.column().style('gap:7px;margin-bottom:16px;width:100%;max-width:640px'):
+            with ui.row().classes('items-center').style('gap:6px;flex-wrap:wrap;width:100%'):
+                for t in tags:
+                    with ui.row().classes('items-center no-wrap').style(
+                            f'gap:5px;padding:3px 6px 3px 9px;border-radius:11px;'
+                            f'background:{theme.ACCENT_TINT};border:1px solid rgba(255,255,255,0.09)'):
+                        ui.label(t).style(f'font-size:11px;font-weight:600;color:{theme.TEXT}')
+                        with ui.element('div').classes('cursor-pointer').style(
+                                'display:flex;align-items:center;justify-content:center;'
+                                'width:13px;height:13px;border-radius:50%'
+                        ).on('click', lambda _, i=aid, tg=t: remove_tag_from_article(i, tg)
+                             ).mark(f'tag-remove-{t}').tooltip(f'Remove "{t}"'):
+                            ui.icon('fa-solid fa-xmark').style(
+                                f'font-size:9px;color:{theme.TEXT_DIM}')
+                if not tags:
+                    ui.label('No tags yet').style(f'font-size:11px;color:{theme.TEXT_DIM}')
+
+            vocab = state.get('tag_vocabulary') or []
+            # Existing tags on the article are dropped from the options so the box only ever
+            # offers something that would actually change the article.
+            options = [v for v in vocab if v not in tags]
+            tag_input = ui.select(
+                options=options, with_input=True, new_value_mode='add-unique',
+                label='Search tags, or type a new one',
+            ).props('dense outlined use-input hide-selected fill-input input-debounce=0').style(
+                'width:100%;max-width:320px;font-size:12px').mark('tag-input')
+
+            async def _submit(e):
+                value = (e.value or '').strip() if hasattr(e, 'value') else ''
+                if not value:
+                    return
+                tag_input.set_value(None)
+                # A value that isn't already in the vocabulary is a new tag, so accepting it
+                # here promotes it -- typing a tag by hand IS the approval.
+                await add_tag_to_article(aid, value, promote=value not in vocab)
+
+            tag_input.on_value_change(_submit)
+
+            if suggested:
+                with ui.row().classes('items-center').style('gap:6px;flex-wrap:wrap;width:100%'):
+                    ui.label('SUGGESTED').style(
+                        f'font-size:9px;font-weight:700;letter-spacing:0.5px;color:{theme.TEXT_DIM}')
+                    for t in suggested:
+                        with ui.row().classes('items-center no-wrap').style(
+                                'gap:5px;padding:3px 6px 3px 9px;border-radius:11px;'
+                                'background:rgba(255,255,255,0.04);'
+                                'border:1px dashed rgba(255,255,255,0.18)'):
+                            ui.label(t).style(f'font-size:11px;color:{theme.TEXT_MUTED}')
+                            with ui.element('div').classes('cursor-pointer').style(
+                                    'display:flex;align-items:center;width:13px;height:13px'
+                            ).on('click', lambda _, i=aid, tg=t: add_tag_to_article(i, tg, promote=True)
+                                 ).mark(f'tag-accept-{t}').tooltip(f'Add "{t}" and learn it'):
+                                ui.icon('fa-solid fa-check').style(f'font-size:9px;color:{theme.GREEN}')
+                            with ui.element('div').classes('cursor-pointer').style(
+                                    'display:flex;align-items:center;width:13px;height:13px'
+                            ).on('click', lambda _, i=aid, tg=t: dismiss_suggestion(i, tg)
+                                 ).mark(f'tag-dismiss-{t}').tooltip('Dismiss'):
+                                ui.icon('fa-solid fa-xmark').style(f'font-size:9px;color:{theme.TEXT_DIM}')
+
     # ---------- rendering: reader ----------
 
     def _reader_content_block(art: dict, data: dict | None):
@@ -1450,9 +1588,8 @@ def build():
                 ui.label(art['content_type']).style(
                     f'font-size:11px;color:{theme.TEXT_MUTED};background:rgba(255,255,255,0.05);'
                     f'border-radius:6px;padding:2px 8px')
-            domain_line = ' · '.join(p for p in [art.get('primary_domain'), art['date']] if p)
-            if domain_line:
-                ui.label(domain_line).style(f'font-size:12px;color:{theme.TEXT_DIM}')
+            if art['date']:
+                ui.label(art['date']).style(f'font-size:12px;color:{theme.TEXT_DIM}')
             ui.label(f"{art.get('reading_minutes', 1)} min read").style(f'font-size:12px;color:{theme.TEXT_DIM}')
         ui.label(art['title']).style(f'font-size:20px;font-weight:700;margin-bottom:10px;color:{theme.TEXT}')
 
@@ -1529,6 +1666,8 @@ def build():
                 ).on('click', lambda _, i=aid: request_delete(i)).mark(
                         f'reader-delete-icon-{aid}').tooltip('Delete'):
                     ui.icon('fa-solid fa-trash').style(f'font-size:12.5px;color:{theme.RED}')
+
+        render_tag_editor(art)
 
         if art.get('why_it_matters'):
             with ui.column().style(

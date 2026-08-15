@@ -5,8 +5,11 @@ Not permanent test infra -- exercises the code against isolated temp data (never
 real ~/projects/homelab-intake articles or the real intake_state.json)."""
 import asyncio
 import json
+import pathlib
 import textwrap
 import threading
+
+import yaml
 
 import pytest
 from fastapi import FastAPI
@@ -132,13 +135,12 @@ def test_conversation_shape_migrates_from_bare_list(tmp_path, monkeypatch):
 # ---------- NiceGUI page smoke tests (isolated seed data) ----------
 
 def _seed_article(dir_path, filename, *, title, date_processed, priority_score=5.0,
-                   is_duplicate=False, tags=None, educational=False, primary_domain='homelab'):
+                   is_duplicate=False, tags=None, educational=False):
     content = textwrap.dedent(f"""\
         ---
         title: {title}
         date_processed: '{date_processed}'
         source_url: https://example.com/{filename}
-        primary_domain: {primary_domain}
         priority_score: {priority_score}
         tags: {tags or []}
         educational: {educational}
@@ -171,17 +173,30 @@ def isolated_intake(tmp_path, monkeypatch):
     # Two educational articles in DIFFERENT sub-topics, so the Education view's grouping
     # has something to actually group; 'Old/New Article' stay non-educational as the
     # negative case.
+    # 'gpu' is the more common tag across this fixture (it is also on New Article), so
+    # these two land under different sub-topic headings -- which is what makes the
+    # Education grouping test meaningful.
     _seed_article(articles_dir, '2026-07-28-090000-rag-guide.md',
                    title='RAG Guide', date_processed='2026-07-28 09:00:00', priority_score=7,
-                   educational=True, primary_domain='ai-llms')
+                   educational=True, tags=['gpu', 'rag'])
     _seed_article(articles_dir, '2026-07-27-090000-proxmox-course.md',
                    title='Proxmox Course', date_processed='2026-07-27 09:00:00', priority_score=6,
-                   educational=True, primary_domain='homelab')
+                   educational=True, tags=['proxmox'])
+    # A second 'gpu' educational article, so GPU clears the 2-article minimum and becomes a
+    # real heading while Proxmox Course (alone under 'proxmox') folds into Other.
+    _seed_article(articles_dir, '2026-07-26-090000-cuda-primer.md',
+                   title='CUDA Primer', date_processed='2026-07-26 09:00:00', priority_score=6,
+                   educational=True, tags=['gpu'])
 
     monkeypatch.setattr(intake_service, 'ARTICLES_DIR', str(articles_dir))
     monkeypatch.setattr(intake_service, 'QUEUE_FILE', str(tmp_path / 'queue.json'))
     monkeypatch.setattr(intake_service, 'QUEUE_LOCK_FILE', str(tmp_path / 'queue.json.lock'))
     monkeypatch.setattr(intake_service, '_articles_cache', {'signature': None, 'articles': None})
+    # Critical: promote_tag() WRITES to this path. Without redirecting it, accepting a tag in
+    # a test would permanently edit the real homelab-intake vocabulary.
+    vocab_file = tmp_path / 'tags_vocabulary.json'
+    vocab_file.write_text(json.dumps(['Docker', 'OpenSource', 'gpu', 'proxmox', 'rag']))
+    monkeypatch.setattr(intake_service, 'TAGS_VOCAB_FILE', str(vocab_file))
 
     state_file = tmp_path / 'intake_state.json'
     monkeypatch.setattr(intake_state, 'STATE_FILE', str(state_file))
@@ -659,19 +674,147 @@ async def test_education_folder_shows_only_educational(user: User, isolated_inta
 
 @pytest.mark.nicegui_main_file('test_intake_fixes.py')
 async def test_education_folder_groups_by_subtopic(user: User, isolated_intake):
-    """Education is browse-by-subject, so it renders sub-topic headers derived from
-    primary_domain -- not the flat reverse-chron list every other folder uses."""
+    """Education is browse-by-subject, so it renders sub-topic headers. With primary_domain
+    gone the heading is each article's most corpus-frequent tag, and headings holding a
+    single article fold into Other -- otherwise the real archive's tag distribution produces
+    one heading per article."""
     await user.open('/intake-test')
     await user.should_see('New Article')
     user.find(marker='folder-education').click()
     await asyncio.sleep(0.2)
-    await user.should_see('AI & LLMS')
-    await user.should_see('HOMELAB & SELF-HOSTING')
+    await user.should_see('GPU')      # 2 articles -> a real heading
+    await user.should_see('OTHER')    # Proxmox Course is alone, so it folds in
+    await user.should_not_see('PROXMOX')
 
 
 @pytest.mark.nicegui_main_file('test_intake_fixes.py')
 async def test_other_folders_are_not_grouped(user: User, isolated_intake):
-    """Grouping is scoped to Education only -- the 'all' triage queue must stay flat."""
+    """Grouping is scoped to Education only -- the 'all' triage queue must stay flat.
+    'OTHER' is asserted because it is a heading the grouped view always emits here and
+    nothing else on the page renders it."""
     await user.open('/intake-test')
     await user.should_see('New Article')
-    await user.should_not_see('AI & LLMS')
+    await user.should_not_see('OTHER')
+
+
+# ---------- tag editing (service layer: pure file round-trips) ----------
+
+def _write_article(dir_path, name, *, tags, suggested=None):
+    meta = {'title': 'T', 'source_url': f'https://example.com/{name}', 'tags': tags}
+    if suggested is not None:
+        meta['suggested_tags'] = suggested
+    (dir_path / name).write_text(
+        '---\n' + yaml.safe_dump(meta, sort_keys=False) + '---\n\n## Summary\n\nbody\n',
+        encoding='utf-8')
+
+
+def test_add_and_remove_tag_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setattr(intake_service, 'ARTICLES_DIR', str(tmp_path))
+    _write_article(tmp_path, 'a.md', tags=['Docker'])
+
+    assert intake_service.add_tag('a.md', 'Tailscale') is True
+    meta, _ = intake_service._parse_frontmatter((tmp_path / 'a.md').read_text())
+    assert meta['tags'] == ['Docker', 'Tailscale']
+
+    assert intake_service.remove_tag('a.md', 'Docker') is True
+    meta, _ = intake_service._parse_frontmatter((tmp_path / 'a.md').read_text())
+    assert meta['tags'] == ['Tailscale']
+
+
+def test_add_tag_is_normalisation_aware(tmp_path, monkeypatch):
+    """Adding 'open source' to an article already carrying 'OpenSource' must be a no-op --
+    otherwise the manual editor reintroduces exactly the variant sprawl the vocabulary work
+    just cleaned up."""
+    monkeypatch.setattr(intake_service, 'ARTICLES_DIR', str(tmp_path))
+    _write_article(tmp_path, 'a.md', tags=['OpenSource'])
+
+    intake_service.add_tag('a.md', 'open source')
+    intake_service.add_tag('a.md', 'Open-Source')
+    meta, _ = intake_service._parse_frontmatter((tmp_path / 'a.md').read_text())
+    assert meta['tags'] == ['OpenSource']
+
+
+def test_accepting_a_tag_clears_it_from_suggestions(tmp_path, monkeypatch):
+    """A suggestion that has been applied must stop being offered, or the article keeps
+    prompting for a tag it already carries."""
+    monkeypatch.setattr(intake_service, 'ARTICLES_DIR', str(tmp_path))
+    _write_article(tmp_path, 'a.md', tags=['Docker'], suggested=['Kubernetes', 'Helm'])
+
+    intake_service.add_tag('a.md', 'Kubernetes')
+    meta, _ = intake_service._parse_frontmatter((tmp_path / 'a.md').read_text())
+    assert meta['tags'] == ['Docker', 'Kubernetes']
+    assert meta['suggested_tags'] == ['Helm']
+
+
+def test_dismiss_suggested_tag_drops_it_without_applying(tmp_path, monkeypatch):
+    monkeypatch.setattr(intake_service, 'ARTICLES_DIR', str(tmp_path))
+    _write_article(tmp_path, 'a.md', tags=['Docker'], suggested=['Kubernetes'])
+
+    assert intake_service.dismiss_suggested_tag('a.md', 'Kubernetes') is True
+    meta, _ = intake_service._parse_frontmatter((tmp_path / 'a.md').read_text())
+    assert meta['tags'] == ['Docker']
+    assert meta['suggested_tags'] == []
+
+
+def test_promote_tag_reuses_existing_canonical_spelling(tmp_path, monkeypatch):
+    """Promoting 'open-source' when 'OpenSource' is already in the vocabulary must return the
+    existing spelling and NOT add a second entry."""
+    vocab = tmp_path / 'v.json'
+    vocab.write_text(json.dumps(['OpenSource', 'Docker']))
+    monkeypatch.setattr(intake_service, 'TAGS_VOCAB_FILE', str(vocab))
+
+    assert intake_service.promote_tag('open-source') == 'OpenSource'
+    assert sorted(json.loads(vocab.read_text())) == ['Docker', 'OpenSource']
+
+    assert intake_service.promote_tag('Kubernetes') == 'Kubernetes'
+    assert 'Kubernetes' in json.loads(vocab.read_text())
+
+
+# ---------- tag editor UI ----------
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_reader_shows_tag_chips_and_removes_one(user: User, isolated_intake):
+    """The tag editor renders above the summary and its per-tag delete actually writes
+    through to frontmatter."""
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    aid = '2026-07-30-235959-new-article.md'
+    user.find(marker=f'article-row-{aid}').click()
+    await user.should_see(f'Stub full text for {aid}', retries=20)
+    await user.should_see('gpu')
+    await user.should_see('ollama')
+
+    user.find(marker='tag-remove-gpu').click()
+    await asyncio.sleep(0.4)
+    meta, _ = intake_service._parse_frontmatter(
+        (pathlib.Path(intake_service.ARTICLES_DIR) / aid).read_text())
+    assert 'gpu' not in meta['tags']
+    assert 'ollama' in meta['tags']
+
+
+def test_group_by_subtopic_folds_single_article_headings():
+    """The fold is what keeps the Education view navigable: measured on the real archive,
+    grouping 23 educational articles by top tag alone produced 16 headings, 13 of them
+    holding one article."""
+    freqs = {'AI': 40, 'Docker': 8, 'Obscure': 1, 'AlsoRare': 1}
+    arts = [
+        {'id': '1', 'tags': ['AI']}, {'id': '2', 'tags': ['AI']}, {'id': '3', 'tags': ['AI']},
+        {'id': '4', 'tags': ['Docker']}, {'id': '5', 'tags': ['Docker']},
+        {'id': '6', 'tags': ['Obscure']},
+        {'id': '7', 'tags': ['AlsoRare']},
+        {'id': '8', 'tags': []},
+    ]
+    groups = intake_page._group_by_subtopic(arts, freqs)
+    assert [h for h, _ in groups] == ['AI', 'Docker', 'Other'], groups
+    assert len(groups[0][1]) == 3
+    # the two singletons plus the untagged article
+    assert {a['id'] for a in groups[-1][1]} == {'6', '7', '8'}
+
+
+def test_subtopic_prefers_the_more_common_tag():
+    """An article tagged both a rare and a common term files under the common one, so
+    related articles actually land together."""
+    freqs = {'AI': 40, 'ADK2.0': 1}
+    assert intake_page._subtopic_of({'tags': ['ADK2.0', 'AI']}, freqs) == 'AI'
+    # deterministic on ties rather than dependent on tag order
+    assert intake_page._subtopic_of({'tags': ['Zebra', 'Apple']}, {'Zebra': 2, 'Apple': 2}) == 'Apple'
