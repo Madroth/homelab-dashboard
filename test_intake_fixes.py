@@ -132,15 +132,16 @@ def test_conversation_shape_migrates_from_bare_list(tmp_path, monkeypatch):
 # ---------- NiceGUI page smoke tests (isolated seed data) ----------
 
 def _seed_article(dir_path, filename, *, title, date_processed, priority_score=5.0,
-                   is_duplicate=False, tags=None):
+                   is_duplicate=False, tags=None, educational=False, primary_domain='homelab'):
     content = textwrap.dedent(f"""\
         ---
         title: {title}
         date_processed: '{date_processed}'
         source_url: https://example.com/{filename}
-        primary_domain: homelab
+        primary_domain: {primary_domain}
         priority_score: {priority_score}
         tags: {tags or []}
+        educational: {educational}
         dup_of: {"'x'" if is_duplicate else 'null'}
         ---
 
@@ -167,6 +168,15 @@ def isolated_intake(tmp_path, monkeypatch):
     _seed_article(articles_dir, '2026-07-29-100000-dup-article.md',
                    title='Dup Article', date_processed='2026-07-29 10:00:00', priority_score=1,
                    is_duplicate=True)
+    # Two educational articles in DIFFERENT sub-topics, so the Education view's grouping
+    # has something to actually group; 'Old/New Article' stay non-educational as the
+    # negative case.
+    _seed_article(articles_dir, '2026-07-28-090000-rag-guide.md',
+                   title='RAG Guide', date_processed='2026-07-28 09:00:00', priority_score=7,
+                   educational=True, primary_domain='ai-llms')
+    _seed_article(articles_dir, '2026-07-27-090000-proxmox-course.md',
+                   title='Proxmox Course', date_processed='2026-07-27 09:00:00', priority_score=6,
+                   educational=True, primary_domain='homelab')
 
     monkeypatch.setattr(intake_service, 'ARTICLES_DIR', str(articles_dir))
     monkeypatch.setattr(intake_service, 'QUEUE_FILE', str(tmp_path / 'queue.json'))
@@ -630,3 +640,38 @@ async def test_discuss_reply_renders_after_send(user: User, isolated_intake):
     # click the pill row by marker -- its label has no listener and clicks don't bubble
     user.find(marker='discuss-prompt-0').click()
     await user.should_see('Stubbed discuss reply.', retries=30)
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_education_folder_shows_only_educational(user: User, isolated_intake):
+    """The Education view is the whole point of the educational field: it must show the
+    items flagged educational and nothing else, so it stays a clean reading list rather
+    than another copy of the inbox."""
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    user.find(marker='folder-education').click()
+    await asyncio.sleep(0.2)
+    await user.should_see('RAG Guide')
+    await user.should_see('Proxmox Course')
+    await user.should_not_see('New Article')
+    await user.should_not_see('Old Article')
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_education_folder_groups_by_subtopic(user: User, isolated_intake):
+    """Education is browse-by-subject, so it renders sub-topic headers derived from
+    primary_domain -- not the flat reverse-chron list every other folder uses."""
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    user.find(marker='folder-education').click()
+    await asyncio.sleep(0.2)
+    await user.should_see('AI & LLMS')
+    await user.should_see('HOMELAB & SELF-HOSTING')
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_other_folders_are_not_grouped(user: User, isolated_intake):
+    """Grouping is scoped to Education only -- the 'all' triage queue must stay flat."""
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    await user.should_not_see('AI & LLMS')

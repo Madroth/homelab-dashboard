@@ -30,10 +30,28 @@ SHORTCUTS = [
 # folders get the same treatment as Favorites (a folder is a deliberate collection too).
 STATUS_ENTRIES = [
     ('all', 'fa-solid fa-inbox', 'All'),
+    ('education', 'fa-solid fa-graduation-cap', 'Education'),
     ('favorites', 'fa-solid fa-star', 'Favorites'),
     ('duplicates', 'fa-solid fa-clone', 'Duplicates'),
     ('archived', 'fa-solid fa-box-archive', 'Archived'),
 ]
+
+# Sub-topic display names for the Education view. Keys are homelab-intake's primary_domain
+# enum (docs/DESIGN.md §5) -- deliberately reusing that taxonomy rather than inventing a
+# second one, so an article's sub-topic here and its domain everywhere else can't disagree.
+DOMAIN_LABELS = {
+    'ai-llms': 'AI & LLMs',
+    'homelab': 'Homelab & Self-hosting',
+    'ai-pm-career': 'AI / PM Career',
+    'gym-business': 'Gym & Business',
+    'hardware': 'Hardware',
+    'dev': 'Software Development',
+    'other': 'Other',
+}
+
+
+def _subtopic_label(domain: str) -> str:
+    return DOMAIN_LABELS.get(domain or '', 'Uncategorized')
 
 _FILENAME_TS_RE = re.compile(r'^(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})')
 
@@ -181,6 +199,11 @@ def build():
             return [a for a in arts if _wf(a['id'])['favorite']]
         if folder == 'duplicates':
             return [a for a in arts if a['is_duplicate']]
+        if folder == 'education':
+            # Same archived/duplicate hiding as 'all' -- this is a reading view, so handled
+            # and duplicate items are noise here for exactly the same reason.
+            return [a for a in arts if a.get('educational')
+                    and not _wf(a['id'])['archived'] and not a['is_duplicate']]
         if folder.startswith('custom:'):
             name = folder[len('custom:'):]
             return [a for a in arts if name in a.get('user_folders', [])]
@@ -193,6 +216,7 @@ def build():
         live = [a for a in arts if not _wf(a['id'])['archived']]
         return {
             'all': len(live),
+            'education': len([a for a in live if a.get('educational') and not a['is_duplicate']]),
             'favorites': len([a for a in arts if _wf(a['id'])['favorite']]),
             'duplicates': len([a for a in arts if a['is_duplicate']]),
             'archived': len([a for a in arts if _wf(a['id'])['archived']]),
@@ -1142,6 +1166,13 @@ def build():
                 msg = f"No articles carry all {len(state['tag_filters'])} selected tags."
             elif state['search']:
                 msg = f'No articles match "{state["search"]}"'
+            elif state['folder'] == 'education':
+                # Distinguishes "nothing is educational" from "nothing has been classified
+                # yet" -- the latter is the expected state until the backfill has run, and a
+                # bare "No articles found." would read as the former.
+                msg = ('No articles are marked educational yet. Articles processed before '
+                       'this view existed need scripts/backfill_educational.py to be run '
+                       'over them first.')
             else:
                 msg = 'No articles found.'
             with ui.column().classes('items-center justify-center').style('width:100%;padding:24px 12px;gap:8px'):
@@ -1152,8 +1183,41 @@ def build():
                         'click', lambda: clear_all_filters())
             return
 
+        if state['folder'] == 'education':
+            _render_grouped_by_subtopic(arts)
+            return
+
         for a in arts:
             _get_row_refreshable(a['id'])()
+
+    def _render_grouped_by_subtopic(arts):
+        """Education is a browse-by-subject view, not a triage queue -- flat reverse-chron
+        buries the one Kubernetes guide under thirty AI ones. Groups preserve whatever sort
+        the user picked *within* each sub-topic; only the grouping is imposed.
+
+        Headers are emitted by render_articles (not by the per-row refreshables), so a
+        single-row refresh never touches them. That's safe because any change that moves an
+        article between groups also changes filtered_articles()' id list, which
+        _refresh_after_workflow_change() already detects and answers with a full rebuild."""
+        groups: dict[str, list] = {}
+        for a in arts:
+            groups.setdefault(a.get('primary_domain') or '', []).append(a)
+
+        # Biggest sub-topic first, alphabetical by display label to break ties, so the
+        # order is stable across renders rather than dict-insertion dependent.
+        for domain in sorted(groups, key=lambda d: (-len(groups[d]), _subtopic_label(d))):
+            items = groups[domain]
+            with ui.row().classes('items-center no-wrap').style(
+                    'width:100%;gap:8px;padding:14px 2px 5px'):
+                ui.label(_subtopic_label(domain).upper()).style(
+                    f'font-size:9.5px;font-weight:700;letter-spacing:0.6px;color:{theme.TEXT_DIM};'
+                    f'flex:none;white-space:nowrap')
+                ui.element('div').style(
+                    'flex:1;height:1px;background:rgba(255,255,255,0.06);min-width:0')
+                ui.label(str(len(items))).style(
+                    f'font-size:9.5px;font-weight:600;color:{theme.TEXT_DIM};flex:none')
+            for a in items:
+                _get_row_refreshable(a['id'])()
 
     def _render_row(a: dict, compact: bool):
         aid = a['id']

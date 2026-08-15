@@ -86,6 +86,10 @@ def _article_from_frontmatter(filename, content, meta, body):
         # New fields, unused by the current UI but available for when it's rebuilt.
         'content_type': content_type,
         'primary_domain': primary_domain,
+        # The "save this to learn from later" axis (homelab-intake docs/DESIGN.md §5).
+        # Absent on articles processed before the field shipped -- those read as False
+        # until scripts/backfill_educational.py has run over the corpus.
+        'educational': bool(meta.get('educational')),
         'priority_score': meta.get('priority_score'),
         'why_it_matters': meta.get('why_it_matters'),
         'status': meta.get('status') or 'Inbox',
@@ -116,6 +120,7 @@ def _article_from_legacy(filename, content):
         'raw_content': content.lower(),
         'content_type': '',
         'primary_domain': '',
+        'educational': False,  # legacy articles predate the field entirely
         'priority_score': None,
         'why_it_matters': None,
         'status': 'Inbox',
