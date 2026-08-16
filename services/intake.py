@@ -245,12 +245,15 @@ def _normalise_tag(tag: str) -> str:
 
 
 def load_tag_vocabulary() -> list[str]:
-    """The controlled vocabulary the pipeline reuses. Drives the tag editor's search box."""
+    """The controlled vocabulary the pipeline reuses, in FILE ORDER -- which is descending
+    corpus frequency (homelab-intake/scripts/seed_tag_vocabulary.py writes it that way, and
+    the tagging prompt injects the top N by taking the first N). Callers wanting alphabetical
+    display should sort their own copy rather than changing this."""
     if not os.path.exists(TAGS_VOCAB_FILE):
         return []
     try:
         with open(TAGS_VOCAB_FILE, 'r', encoding='utf-8') as f:
-            return sorted(json.load(f), key=str.lower)
+            return list(json.load(f))
     except (OSError, ValueError):
         return []
 
@@ -265,11 +268,15 @@ def promote_tag(tag: str) -> str:
     key = _normalise_tag(tag)
     if key in existing:
         return existing[key]
+    # Appended, and written back in order -- NOT re-sorted. The file's order is the frequency
+    # ranking the tagging prompt reads, so sorting here would silently destroy it on the first
+    # tag you accept in the UI. Appending is also correct on the merits: a tag being promoted
+    # for the first time is the least-used one in the vocabulary.
     vocab.append(tag)
     tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(TAGS_VOCAB_FILE), suffix='.tmp')
     try:
         with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
-            json.dump(sorted(set(vocab), key=str.lower), f, indent=2, ensure_ascii=False)
+            json.dump(vocab, f, indent=2, ensure_ascii=False)
         os.replace(tmp_path, TAGS_VOCAB_FILE)
     except BaseException:
         with contextlib.suppress(OSError):

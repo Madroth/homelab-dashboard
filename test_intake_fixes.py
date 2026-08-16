@@ -818,3 +818,30 @@ def test_subtopic_prefers_the_more_common_tag():
     assert intake_page._subtopic_of({'tags': ['ADK2.0', 'AI']}, freqs) == 'AI'
     # deterministic on ties rather than dependent on tag order
     assert intake_page._subtopic_of({'tags': ['Zebra', 'Apple']}, {'Zebra': 2, 'Apple': 2}) == 'Apple'
+
+
+def test_promote_tag_preserves_frequency_ordering(tmp_path, monkeypatch):
+    """The vocabulary file's ORDER is its frequency ranking, and the tagging prompt injects
+    the top N by taking the first N. promote_tag() must append, not re-sort -- sorting would
+    silently destroy that ranking the first time a tag is accepted in the UI."""
+    vocab = tmp_path / 'v.json'
+    ranked = ['AI', 'OpenSource', 'Automation', 'Docker']   # descending frequency, NOT alphabetical
+    vocab.write_text(json.dumps(ranked))
+    monkeypatch.setattr(intake_service, 'TAGS_VOCAB_FILE', str(vocab))
+
+    intake_service.promote_tag('Zebra')
+    after = json.loads(vocab.read_text())
+    assert after == ranked + ['Zebra'], (
+        'promote_tag re-ordered the vocabulary; the frequency ranking the tagging prompt '
+        f'depends on has been lost: {after}')
+
+    # a no-op promotion must not reorder either
+    intake_service.promote_tag('open-source')
+    assert json.loads(vocab.read_text()) == ranked + ['Zebra']
+
+
+def test_load_tag_vocabulary_keeps_file_order(tmp_path, monkeypatch):
+    vocab = tmp_path / 'v.json'
+    vocab.write_text(json.dumps(['AI', 'OpenSource', 'Automation']))
+    monkeypatch.setattr(intake_service, 'TAGS_VOCAB_FILE', str(vocab))
+    assert intake_service.load_tag_vocabulary() == ['AI', 'OpenSource', 'Automation']
