@@ -50,10 +50,17 @@ def _get_or_create_label() -> str | None:
         return None
 
 
-def send_article_to_plane(article: dict, summary: str) -> tuple[bool, str | None]:
-    """Creates a Plane issue from an article. Returns (success, error_message)."""
+def send_article_to_plane(article: dict, summary: str) -> dict:
+    """Creates a Plane issue from an article, then reads it back to confirm it exists.
+
+    Returns {'created', 'verified', 'issue_id', 'error'}. `created` means Plane accepted
+    the POST; `verified` means a follow-up GET found the issue actually there. They are
+    reported separately on purpose: a read-back that fails after a successful create must
+    not be mistaken for "not sent", or the caller retries and files a duplicate.
+    """
     if not all([PLANE_API_KEY, PLANE_API_URL, PLANE_WORKSPACE_SLUG, PLANE_PROJECT_ID]):
-        return False, 'Plane is not configured (missing values in homelab-dashboard/.env).'
+        return {'created': False, 'verified': False, 'issue_id': None,
+                'error': 'Plane is not configured (missing values in homelab-dashboard/.env).'}
 
     try:
         label_id = _get_or_create_label()
@@ -71,6 +78,20 @@ def send_article_to_plane(article: dict, summary: str) -> tuple[bool, str | None
 
         resp = requests.post(f"{_base_url()}/issues/", headers=_headers(), json=payload, timeout=30)
         resp.raise_for_status()
-        return True, None
+        issue_id = resp.json().get('id')
     except requests.RequestException as e:
-        return False, str(e)
+        return {'created': False, 'verified': False, 'issue_id': None, 'error': str(e)}
+
+    return {'created': True, 'issue_id': issue_id, 'error': None,
+            'verified': _issue_exists(issue_id)}
+
+
+def _issue_exists(issue_id: str | None) -> bool:
+    """True if Plane can still hand back the issue we were just told it created."""
+    if not issue_id:
+        return False
+    try:
+        resp = requests.get(f"{_base_url()}/issues/{issue_id}/", headers=_headers(), timeout=15)
+        return resp.status_code == 200 and resp.json().get('id') == issue_id
+    except requests.RequestException:
+        return False

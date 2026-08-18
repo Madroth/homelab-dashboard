@@ -17,7 +17,10 @@ import tempfile
 STATE_FILE = os.path.expanduser('~/projects/homelab-dashboard/intake_state.json')
 CONVERSATIONS_FILE = os.path.expanduser('~/projects/homelab-dashboard/intake_conversations.json')
 
-_DEFAULT_ARTICLE_STATE = {'read': False, 'favorite': False, 'archived': False}
+# plane_issue_id doubles as the 'already sent' flag -- holding the id rather than a
+# bare bool means a sent article can be traced back to its actual to-do.
+_DEFAULT_ARTICLE_STATE = {'read': False, 'favorite': False, 'archived': False,
+                          'plane_issue_id': None}
 _DEFAULT_STATE = {'articles': {}, 'folders': [], 'prefs': {'density': 'cozy', 'sort': 'unread'}}
 _DEFAULT_SOURCES = {'archive': True, 'repos': []}
 DEFAULT_MODEL = 'claude'  # per-article picks (see get_model/set_model) override this

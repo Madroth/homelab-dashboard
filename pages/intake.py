@@ -461,6 +461,12 @@ def build():
         art = next((a for a in state['articles'] if a['id'] == aid), None)
         if not art:
             return
+        # The row/reader control renders as an inert checkmark once sent, but the `s`
+        # shortcut still reaches here -- and an unguarded second send files a duplicate
+        # to-do, which is exactly how the lost-toast bug produced two.
+        if _wf(aid).get('plane_issue_id'):
+            notify_on(capture_client(), 'Already sent to HomeLab.', type='info')
+            return
         # Captured before render_articles.refresh() below tears down this handler's
         # originating row slot -- see capture_client()'s docstring for the full
         # mechanism. Without this, every client_alive() check past that refresh would
@@ -482,21 +488,30 @@ def build():
                 if state.get('selected') == aid:
                     render_reader.refresh()
             return
-        success, error = result
+        success, error = result['created'], result['error']
         if success:
             # Persist unconditionally (mirrors toggle_read/toggle_favorite/toggle_archived) --
             # the Plane to-do was really created, so local state must reflect that even if
             # the tab closes mid-request; only the in-memory patch/refresh needs a live client.
-            await run.io_bound(intake_state.set_article_state, aid, read=True, archived=True)
+            await run.io_bound(intake_state.set_article_state, aid, read=True, archived=True,
+                                plane_issue_id=result['issue_id'])
             if client_alive(client):
-                _apply_workflow_change(aid, read=True, archived=True)
+                _apply_workflow_change(aid, read=True, archived=True,
+                                        plane_issue_id=result['issue_id'])
                 render_articles.refresh()
                 render_folder_dropdown.refresh()
                 render_header.refresh()
                 live_state.refresh_all(exclude='intake', client=client)
                 if state.get('selected') == aid:
                     render_reader.refresh()
-                notify_on(client, 'Sent to HomeLab · to-do created, article archived.', type='positive')
+                if result['verified']:
+                    notify_on(client, 'Sent to HomeLab · to-do created, article archived.',
+                              type='positive')
+                else:
+                    # Created, but the read-back could not find it. Say so rather than
+                    # claiming success -- and still record the id, so no retry duplicates it.
+                    notify_on(client, 'Sent to HomeLab, but could not confirm the to-do exists.',
+                              type='warning')
         else:
             if client_alive(client):
                 render_articles.refresh()
@@ -1372,6 +1387,13 @@ def build():
                         'width:28px;height:28px;display:flex;align-items:center;justify-content:center'
                 ).mark(f'sending-{aid}'):
                     ui.spinner(size='xs').style(f'color:{theme.PURPLE}')
+            elif wf.get('plane_issue_id'):
+                # Inert on purpose: the to-do already exists, and a second send would
+                # duplicate it rather than update it.
+                with ui.element('div').style(
+                        'width:28px;height:28px;display:flex;align-items:center;justify-content:center'
+                ).mark(f'sent-icon-{aid}').tooltip('Already sent to HomeLab'):
+                    ui.icon('fa-solid fa-check').style(f'font-size:12.5px;color:{theme.GREEN}')
             else:
                 with ui.element('div').classes('cursor-pointer').style(
                         'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center'
@@ -1649,6 +1671,12 @@ def build():
                             'width:28px;height:28px;display:flex;align-items:center;justify-content:center'
                     ).mark(f'reader-sending-{aid}'):
                         ui.spinner(size='xs').style(f'color:{theme.PURPLE}')
+                elif wf.get('plane_issue_id'):
+                    with ui.element('div').style(
+                            'width:28px;height:28px;display:flex;align-items:center;'
+                            'justify-content:center'
+                    ).mark(f'reader-sent-icon-{aid}').tooltip('Already sent to HomeLab'):
+                        ui.icon('fa-solid fa-check').style(f'font-size:12.5px;color:{theme.GREEN}')
                 else:
                     with ui.element('div').classes('cursor-pointer').style(
                             'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'

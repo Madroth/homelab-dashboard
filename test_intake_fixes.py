@@ -211,7 +211,8 @@ def isolated_intake(tmp_path, monkeypatch):
         with open(call_log, 'a') as f:
             f.write(f'called with {article.get("id")}\n')
         time.sleep(0.3)
-        return True, None
+        return {'created': True, 'verified': True,
+                'issue_id': 'stub-issue-id', 'error': None}
 
     monkeypatch.setattr(plane_service, 'send_article_to_plane', _delayed_send)
 
@@ -420,7 +421,10 @@ async def test_send_to_homelab_shows_immediate_feedback(user: User, isolated_int
         if not state_file.exists():
             return False
         entry = json.loads(state_file.read_text()).get('articles', {}).get(aid, {})
-        return entry.get('archived') is True and entry.get('read') is True
+        # plane_issue_id is what makes the control render as a checkmark and what stops a
+        # second send filing a duplicate, so it has to be persisted alongside read/archived.
+        return (entry.get('archived') is True and entry.get('read') is True
+                and entry.get('plane_issue_id') == 'stub-issue-id')
 
     ok = await _wait_until(_archived_and_read)
     if not ok:
@@ -845,3 +849,81 @@ def test_load_tag_vocabulary_keeps_file_order(tmp_path, monkeypatch):
     vocab.write_text(json.dumps(['AI', 'OpenSource', 'Automation']))
     monkeypatch.setattr(intake_service, 'TAGS_VOCAB_FILE', str(vocab))
     assert intake_service.load_tag_vocabulary() == ['AI', 'OpenSource', 'Automation']
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_already_sent_article_shows_a_checkmark_not_a_send_button(user: User, isolated_intake):
+    """A recorded plane_issue_id is what marks an article as already filed. The control
+    has to render as an inert checkmark rather than a live send button -- a second send
+    creates a second to-do rather than updating the first."""
+    aid = '2026-07-30-235959-new-article.md'
+    state_file = isolated_intake['state_file']
+    state_file.write_text(json.dumps({
+        'articles': {aid: {'read': False, 'favorite': False, 'archived': False,
+                           'plane_issue_id': 'already-filed-id'}},
+        'folders': [], 'prefs': {'density': 'cozy', 'sort': 'unread'},
+    }))
+
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    await user.should_see(marker=f'sent-icon-{aid}')
+
+    with pytest.raises(AssertionError):
+        user.find(marker=f'send-icon-{aid}')
+
+
+# ---------- Plane send: create vs. confirm are reported separately ----------
+
+class _FakeResponse:
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+            raise requests.RequestException(f'{self.status_code} Client Error')
+
+    def json(self):
+        return self._payload
+
+
+def _stub_plane(monkeypatch, *, post, get):
+    """Points services.plane at fake HTTP, with config filled in so the real .env values
+    (and the real Plane instance) are never involved."""
+    for name in ('PLANE_API_KEY', 'PLANE_API_URL', 'PLANE_WORKSPACE_SLUG', 'PLANE_PROJECT_ID'):
+        monkeypatch.setattr(plane_service, name, 'stub')
+    monkeypatch.setattr(plane_service, '_get_or_create_label', lambda: None)
+    monkeypatch.setattr(plane_service, 'requests',
+                        type('R', (), {'post': staticmethod(post), 'get': staticmethod(get),
+                                       'RequestException': Exception})())
+
+
+def test_send_marks_verified_when_the_issue_reads_back(monkeypatch):
+    _stub_plane(monkeypatch,
+                post=lambda *a, **kw: _FakeResponse(201, {'id': 'new-issue'}),
+                get=lambda *a, **kw: _FakeResponse(200, {'id': 'new-issue'}))
+    result = plane_service.send_article_to_plane({'title': 'T', 'source': 'https://x/'}, 'summary')
+    assert result == {'created': True, 'verified': True, 'issue_id': 'new-issue', 'error': None}
+
+
+def test_send_keeps_the_issue_id_when_the_read_back_fails(monkeypatch):
+    """created=True with verified=False must still carry the id: the to-do may well exist,
+    so the caller has to record it and NOT offer a retry that would file a duplicate."""
+    _stub_plane(monkeypatch,
+                post=lambda *a, **kw: _FakeResponse(201, {'id': 'new-issue'}),
+                get=lambda *a, **kw: _FakeResponse(404, {}))
+    result = plane_service.send_article_to_plane({'title': 'T', 'source': 'https://x/'}, 'summary')
+    assert result['created'] is True
+    assert result['verified'] is False
+    assert result['issue_id'] == 'new-issue'
+
+
+def test_send_reports_failure_when_plane_rejects_the_create(monkeypatch):
+    _stub_plane(monkeypatch,
+                post=lambda *a, **kw: _FakeResponse(403, {}),
+                get=lambda *a, **kw: _FakeResponse(200, {}))
+    result = plane_service.send_article_to_plane({'title': 'T', 'source': 'https://x/'}, 'summary')
+    assert result['created'] is False
+    assert result['issue_id'] is None
+    assert '403' in result['error']
