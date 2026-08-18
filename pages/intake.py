@@ -6,7 +6,7 @@ from nicegui import run, ui
 
 from components import ai_context, discuss_panel, live_state, theme
 from components.confirm_dialog import confirm
-from components.util import capture_client, client_alive
+from components.util import capture_client, client_alive, notify_on
 from services import fulltext, intake, intake_state, plane
 from services.ai import discuss
 
@@ -496,13 +496,13 @@ def build():
                 live_state.refresh_all(exclude='intake', client=client)
                 if state.get('selected') == aid:
                     render_reader.refresh()
-                ui.notify('Sent to HomeLab · to-do created, article archived.', type='positive')
+                notify_on(client, 'Sent to HomeLab · to-do created, article archived.', type='positive')
         else:
             if client_alive(client):
                 render_articles.refresh()
                 if state.get('selected') == aid:
                     render_reader.refresh()
-                ui.notify(f'Failed to send to HomeLab: {error}', type='negative')
+                notify_on(client, f'Failed to send to HomeLab: {error}', type='negative')
 
     # ---------- bulk actions ----------
 
@@ -745,6 +745,9 @@ def build():
             ui.notify(f"Resubmit failed: {result.get('error')}", type='negative')
 
     async def move_article_to_folder(aid):
+        # Captured before reload_articles() tears down this handler's originating row slot,
+        # which would otherwise swallow the toast below (capture_client()/notify_on()).
+        client = capture_client()
         folder = await _prompt_folder_choice(state['folders'])
         if not folder:
             return
@@ -755,7 +758,7 @@ def build():
                 state['folders'] = folders
         await run.io_bound(intake.add_to_folder, aid, folder)
         await reload_articles()
-        ui.notify(f'Moved to "{folder}"', type='positive')
+        notify_on(client, f'Moved to "{folder}"', type='positive')
 
     # ---------- Discuss ----------
 

@@ -1,4 +1,4 @@
-from nicegui import context
+from nicegui import context, ui
 from nicegui.client import Client
 
 
@@ -36,3 +36,26 @@ def client_alive(client: Client | None = None) -> bool:
         return not context.client.is_deleted
     except RuntimeError:
         return False
+
+
+def notify_on(client: Client | None, *args, **kwargs) -> None:
+    """ui.notify() aimed at a captured client, for handlers that refresh their own slot.
+
+    ui.notify() finds its target the same way client_alive() used to -- by walking up the
+    slot stack via context.client -- so it raises the same RuntimeError once a handler has
+    torn down the row it was dispatched from, and the toast is lost. That failure is
+    invisible from the browser: the work already happened, only the confirmation vanishes,
+    which reads as "the button did nothing" and invites a second click. Re-entering the
+    captured client gives the call a live slot to render into.
+
+    Deliberately not covered by the test suite: NiceGUI's test harness falls back to a
+    pseudo-client whenever the slot stack is unusable, so a bare ui.notify() always
+    succeeds under test and this failure cannot be reproduced there. Verify by clicking.
+    """
+    if not client_alive(client):
+        return
+    if client is None:
+        ui.notify(*args, **kwargs)
+        return
+    with client:
+        ui.notify(*args, **kwargs)
