@@ -26,19 +26,28 @@ def _headers() -> dict:
 
 
 def _get_or_create_label() -> str | None:
-    """Returns the Plane label ID for PLANE_ARTICLE_LABEL, creating it if missing."""
-    resp = requests.get(f"{_base_url()}/labels/", headers=_headers(), timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
-    labels = data.get('results', data) if isinstance(data, dict) else data
-    for label in labels:
-        if label.get('name') == PLANE_ARTICLE_LABEL:
-            return label['id']
+    """Returns the Plane label ID for PLANE_ARTICLE_LABEL, creating it if missing.
 
-    resp = requests.post(f"{_base_url()}/labels/", headers=_headers(),
-                          json={'name': PLANE_ARTICLE_LABEL, 'color': '#cba6f7'}, timeout=15)
-    resp.raise_for_status()
-    return resp.json().get('id')
+    Returns None -- leaving the issue unlabelled -- if the label endpoints are not
+    reachable. An API key whose user is not a member of the project is workspace-scoped:
+    Plane answers 403 on /labels/ while still accepting the issue POST. Labelling is a
+    nicety and must not be able to lose the to-do itself.
+    """
+    try:
+        resp = requests.get(f"{_base_url()}/labels/", headers=_headers(), timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        labels = data.get('results', data) if isinstance(data, dict) else data
+        for label in labels:
+            if label.get('name') == PLANE_ARTICLE_LABEL:
+                return label['id']
+
+        resp = requests.post(f"{_base_url()}/labels/", headers=_headers(),
+                              json={'name': PLANE_ARTICLE_LABEL, 'color': '#cba6f7'}, timeout=15)
+        resp.raise_for_status()
+        return resp.json().get('id')
+    except requests.RequestException:
+        return None
 
 
 def send_article_to_plane(article: dict, summary: str) -> tuple[bool, str | None]:
