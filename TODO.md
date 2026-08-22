@@ -99,6 +99,11 @@
   with a fine UI and zero monitors while seven failures went unseen. Detection is the
   phone's job (ntfy, M1); investigation is this page's.
 
+  **Feature backlog: `docs/LAB_HEALTH_FEATURES.md`** (2026-08-22) — P0–P4 in priority
+  order, from Chris's framing that the page is for looking at everything and investigating
+  further. P0–P3 are all derived-on-read from this box (docker / systemd / /proc / journald)
+  and depend on `homelab-monitoring` for nothing; only P4 waits.
+
   What does NOT wait — build these two:
   - [ ] Phase 0.8, explicitly ungated ("not a monitor, so M1 does not gate it"): monitoring
         gets a home with Uptime Kuma `:3001` and Dozzle `:8888`, and the Media Curator

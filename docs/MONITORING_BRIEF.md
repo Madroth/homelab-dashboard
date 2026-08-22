@@ -7,8 +7,10 @@ aesthetic decisions are Claude Design's to make. Everything below is functional/
 context: what the page is for, what data really exists behind it, what must never be
 shown, and which features are live versus gated.
 
-Companion docs in this repo: `DESIGN_BRIEF.md` (whole-dashboard product context and the
-other five tabs), `IMPLEMENTATION_GUIDE.md` (service-layer contracts).
+Companion docs in this repo: `LAB_HEALTH_FEATURES.md` (**the prioritized build backlog for
+this page — start there for what to build and in what order**; this file is the design/UI
+brief that goes to a design session), `DESIGN_BRIEF.md` (whole-dashboard product context and
+the other five tabs), `IMPLEMENTATION_GUIDE.md` (service-layer contracts).
 
 **Governing docs outside this repo — read these, they constrain the design more than
 anything in this file:** `~/HomeLab/MONITORING.md` (the reasoning: failure classes,
