@@ -17,8 +17,59 @@
   - [ ] Add a dedicated tag-filter UI to the article intake tab — tags currently only match via the free-text search bar, no way to browse/filter by tag directly.
   - [ ] Decide on presentation (filter chips, tag cloud, etc.) alongside the existing Homelab/News/Errors folder sidebar.
 
+- [ ] **Article Intake — investigate (noted 2026-08-04, from Chris's live testing)**
+  - [ ] Reader's action icons go stale after workflow toggles: clicking Favorite (from
+    either the list row or the reader itself) updates the list row's highlight
+    immediately, but the reader pane's own star doesn't repaint until something else
+    rebuilds the reader (switching articles, opening Discuss, etc.). Cause is visible in
+    `pages/intake.py`: `toggle_read`/`toggle_favorite`/`toggle_archived` call
+    `_refresh_after_workflow_change()` (list row) but never `render_reader.refresh()`
+    when the toggled article is the one open in the reader. State on disk is always
+    correct — purely a repaint gap. Applies to the reader's Read/Archive icons too, and
+    now also bites in Discuss mode since the action row shows there as well (2026-08-04
+    change). DON'T fix blind: Chris is mid-testing and collecting more behavior notes —
+    batch them, then investigate together.
+  - [ ] Failed queue entries give no way to read/copy the error: clicking the entry
+    just retries it, and the error text only exists as a hover tooltip ("RETRY n/3").
+    Chris wants to be able to see and copy/paste the full error. (Noted 2026-08-04
+    while triaging the Omega-unreachable failures below.)
+
 - [ ] **Media Stack (Frontend & GUI Config)**
   - [ ] Connect Prowlarr indexers to Radarr & Sonarr.
   - [ ] Link Radarr & Sonarr to qBittorrent via API keys.
   - [ ] Claim Plex server and configure library folders (`/data/media`).
   - [ ] Setup Discord/Telegram Webhook alerts inside Uptime Kuma.
+
+- [ ] **Send to HomeLab — hardening (2026-08-18)** — full plan and findings live in
+  `homelab-intake/TODO.md` ("Send to HomeLab + its support systems"); this is the
+  dashboard-side slice of it. Four fixes are committed (`f489f8f` label failure no longer
+  sinks the send, `181752e` toasts survive a handler refreshing its own row, `6fffbc5`
+  issue id recorded + read back + checkmark, `ca6334c` idempotent resend via Plane's
+  `external_id` — a repeat POST returns 409 with the id Plane already holds, proven against
+  live Plane — plus a catch-all so nothing unexpected escapes the send and leaves the row's
+  spinner turning forever). Suite green at 48. **The running service is still on the old
+  code — it needs a restart to pick up `ca6334c`.** Still open here:
+  - [ ] Reconcile recorded `plane_issue_id`s against Plane so a to-do deleted there clears
+    the article's checkmark — today verification runs only at send time.
+  - [ ] No project picker: every article goes to the one project in `.env`.
+  - [ ] A sent article's to-do is write-once; nothing updates it afterwards.
+
+- [ ] **Lab health / observability home (noted 2026-08-22, Chris)** — one place to see
+  whether the lab is healthy, rather than the pieces scattered across pages. Today
+  `pages/system.py` is the closest thing and only covers part of it: `services.system.get_status()`
+  returns a DEFCON list (mount down, <5% free, Gluetun collapsed, media-curator inactive),
+  `docker ps` container cards, `/mnt/Multimedia` disk usage, Plex's memory line, and
+  `get_logs()` for a log tail. Decide whether this becomes that page or sits beside it.
+  - [ ] Lab health at a glance: one honest up/degraded/down verdict per service, not just
+    a container's own `Status` string — a running container is not a working service.
+  - [ ] System status beyond the media stack: host uptime, load, the other systemd units,
+    Tailscale reachability (Omega at `100.74.2.92`, the bridge service), NAS mount.
+  - [ ] Resource usage: host CPU / RAM / temps and per-container stats. `docker stats` is
+    only read for Plex today, and nothing is kept over time — no trend, so a slow leak or a
+    filling disk is invisible until it trips a DEFCON threshold.
+  - [ ] Notifications: somewhere alerts actually land and can be acknowledged. The DEFCON
+    banner only shows while you happen to be on the page, and the Uptime Kuma
+    Discord/Telegram webhooks under Media Stack are still unconfigured.
+  - [ ] Error reporting: a real surface for failures with the full text readable and
+    copyable — this is the general form of the intake failed-queue complaint above, where
+    the error survives only as a hover tooltip.
