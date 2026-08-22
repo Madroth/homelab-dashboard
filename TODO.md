@@ -139,3 +139,32 @@
     permanently unsendable short of hand-editing `intake_state.json`.
   - [ ] No project picker: every article goes to the one project in `.env`.
   - [ ] A sent article's to-do is write-once; nothing updates it afterwards.
+
+- [ ] **media-curator coupling — a change over there landed today that reaches in here (2026-08-22)**
+  `services/media.py` does `sys.path.append('/home/linuxbox/projects/media-curator')` and imports
+  that repo's internals directly: `database.get_conn`, `library.approve_item`/`reject_item`,
+  `curator_daemon.identify_media`, `DROP_ZONE`, `is_contained`. No package boundary, no version
+  pin, so a refactor there breaks this with no compile-time or test-time signal. That risk stopped
+  being theoretical today.
+
+  **What changed in media-curator (commits `1ebc6f4`, `8e817d3`):**
+  - `queue.db` gained an `alert_state` table and `PRAGMA user_version` migrations. `get_conn()` is
+    unchanged, so nothing here breaks — but this repo is now the **third writer** to that database
+    (daemon, this app, and this app's AI assistant tool).
+  - `check_exists(original_path)` is now `check_exists(original_path, file_hash=None)` and matches
+    on status as well as path. It also **raises** on a database error instead of returning `False`.
+    Nothing here calls it today — that was checked — but it is the bridge to watch.
+  - The `UNIQUE` index on `original_path` was **dropped**, replaced by a partial unique index over
+    `(original_path, file_hash)` that applies only to `pending` rows.
+  - Two new statuses exist: `superseded` and `rejected_kept`. `static/app.js` filters explicitly on
+    `'pending'`/`'approved'`, so neither renders in the active list — correct by luck, not design.
+
+  - [ ] **`undo()` in `services/media.py` needs a look.** It does
+        `UPDATE media_queue SET status="pending", original_path=?` with a flattened
+        `DROP_ZONE/original_filename` path. Under the old unique index a collision raised
+        `IntegrityError` loudly; it can now violate the new *partial* index instead, which is still
+        the right outcome, but `undo()` has no handler and would 500. Reachable from a button.
+  - [ ] Give `pages/media.py` and `services/media.py` some tests — there are none, and they are the
+        surface most exposed to the coupling above.
+  - [ ] Decide whether this stays an import-the-internals arrangement or gets a real boundary.
+        Recorded as tech debt in media-curator's EPICS Epic 7; nobody owns it yet.
