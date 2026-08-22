@@ -35,6 +35,20 @@ own tools (Uptime Kuma, Dozzle) currently have no home in the dashboard — thei
 entry point is a quick-link parked on the **Media Curator** page, pointing at a service
 that page no longer owns.
 
+## 1a. What the page is for — and what it is not
+
+Chris, 2026-08-22: the dashboard is where he looks at *everything* and investigates
+further. So this page's job is **surfacing errors and drilling into them** — full error
+text, readable and copyable, and a path from "that is red" to "here is what it says and
+what to run". Not a wall of green tiles offering reassurance.
+
+The corollary matters as much: **this page is not a detector, and must not be designed as
+if it were.** MONITORING.md's one principle — *a detector may not depend on the health of
+the thing it monitors* — explicitly excludes dashboards, and Uptime Kuma ran for months
+with a perfectly good UI and zero monitors while seven failures went unseen. Detection is
+the phone's job (ntfy). This page is what you open once you already know, or when you go
+looking. Design it as an investigation surface, not an alarm.
+
 ## 2. Why this lab is unusual, and what it means for the design
 
 On 2026-08-15 an audit found **seven failures that had been running silently for days or

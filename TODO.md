@@ -79,6 +79,37 @@
         copyable — this is the general form of the intake failed-queue complaint above,
         where the error survives only as a hover tooltip.
 
+  **Sequencing decided 2026-08-22 (Chris). Most of this waits for the monitors.** The
+  design work is done and parked: `docs/MONITORING_BRIEF.md` (24 features in four tiers,
+  grounded in `~/HomeLab/MONITORING.md` and the coverage registry) plus a four-artboard
+  canvas at https://claude.ai/code/artifact/162c3a93-1e9b-431f-bd0f-6d8458e04532. Do not
+  redo either; do not build against them yet.
+
+  Why it waits: 0 of 8 declared checks are live, so there is no check *output* to design
+  against — what a live check returns (status, last-run, error text, grace countdown) is
+  settled by M1/M2 and determines the subject table more than any layout choice does. The
+  build backlog says the same thing under "Suggested cut lines": **"Defer freely: M7"**,
+  and M7 is this. Anything registry-driven — subject table, coverage/staleness, check
+  states, root-fix list — waits for real checks.
+
+  **Chris's framing for what the page is for (2026-08-22):** the dashboard is where he
+  looks at *everything* and investigates further — so its job is surfacing errors and
+  drilling into them, not reassurance. It is deliberately NOT a detector: under
+  MONITORING.md's one principle a dashboard cannot be one, and Uptime Kuma ran for months
+  with a fine UI and zero monitors while seven failures went unseen. Detection is the
+  phone's job (ntfy, M1); investigation is this page's.
+
+  What does NOT wait — build these two:
+  - [ ] Phase 0.8, explicitly ungated ("not a monitor, so M1 does not gate it"): monitoring
+        gets a home with Uptime Kuma `:3001` and Dozzle `:8888`, and the Media Curator
+        quick-link decision gets recorded either way.
+  - [ ] The floor, all computable today with no monitoring system: failed units
+        (`systemctl list-units --state=failed`, both managers), mount truth
+        (`os.path.ismount`), container health (`docker ps -a`), capacity
+        (`shutil.disk_usage`). `services/system.py` already does three of the four. Not
+        hypothetical — `plane-backup.service`, `livescore.service` and
+        `snap.tailscale.tailscaled.service` are failed right now and nothing says so.
+
 - [ ] **Send to HomeLab — hardening (2026-08-18)** — full plan and findings live in
   `homelab-intake/TODO.md` ("Send to HomeLab + its support systems"); this is the
   dashboard-side slice of it. Four fixes are committed (`f489f8f` label failure no longer
