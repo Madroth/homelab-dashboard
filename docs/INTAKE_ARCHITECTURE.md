@@ -317,7 +317,7 @@ a capture-phase listener, not a one-line addition to the existing handler.
 ## 8. Verification
 
 `test_intake_fixes.py` (pytest + `nicegui.testing.User`, isolated temp data — never
-the real article archive or real `intake_state.json`): 48 tests as of `e0ea2ff`
+the real article archive or real `intake_state.json`): 54 tests as of `ef907f4`
 (16 when this section was first written), covering the pure
 sort/lock/migration logic plus page-level checks for duplicates-exclusion,
 density toggle, reader open/close, inline delete-confirm, the two archived-inclusion

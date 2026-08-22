@@ -176,6 +176,7 @@ def build():
         'discuss': {'model': intake_state.DEFAULT_MODEL, 'active_sources': {'article', 'archive'},
                      'repo_scope_open': False, 'thread': [], 'busy': False},
         'focused_id': None, 'articles_loaded': False, 'sending_ids': set(), 'confirming_ids': set(),
+        'verifying_ids': set(),
         'thread_counts': {},
     }
     # Populated by render_tag_dropdown() each time it (re)builds; lets select_tag()
@@ -530,6 +531,57 @@ def build():
                 if state.get('selected') == aid:
                     render_reader.refresh()
                 notify_on(client, f'Failed to send to HomeLab: {error}', type='negative')
+
+    async def verify_plane_todo(aid):
+        """Re-checks a recorded to-do against Plane, clearing the checkmark if it is gone.
+
+        Without this the checkmark is a one-way door: plane_issue_id was written on a
+        successful send and nothing anywhere cleared it, while the control it drives is
+        inert and the `s` shortcut refuses to resend. Delete the to-do in Plane and the
+        article became permanently unsendable -- the flag said "filed" forever, and only
+        hand-editing intake_state.json could undo it.
+        """
+        if aid in state['verifying_ids'] or aid in state['sending_ids']:
+            return
+        issue_id = _wf(aid).get('plane_issue_id')
+        if not issue_id:
+            return
+        # Captured before the refresh below tears down this handler's own slot -- same
+        # mechanism as send_to_homelab, see capture_client()'s docstring.
+        client = capture_client()
+        state['verifying_ids'].add(aid)
+        _refresh_send_control(aid)
+        try:
+            status = await run.io_bound(plane.issue_status, issue_id)
+        finally:
+            state['verifying_ids'].discard(aid)
+        if status == 'gone':
+            # Persist unconditionally, then patch in memory only if the tab is still
+            # there -- mirrors send_to_homelab's split for the same reason.
+            await run.io_bound(intake_state.set_article_state, aid, plane_issue_id=None)
+            if client_alive(client):
+                _apply_workflow_change(aid, plane_issue_id=None)
+        if not client_alive(client):
+            return
+        _refresh_send_control(aid)
+        if status == 'gone':
+            notify_on(client, 'That to-do no longer exists in HomeLab — you can send again.',
+                      type='warning')
+        elif status == 'present':
+            notify_on(client, 'Still filed in HomeLab.', type='positive')
+        else:
+            # Includes run.io_bound returning None on a cancelled call. Plane did not say
+            # the to-do is gone, so nothing was cleared -- say that rather than implying
+            # the checkmark was checked and stands.
+            notify_on(client, 'Could not reach HomeLab — checkmark left as it is.', type='info')
+
+    def _refresh_send_control(aid):
+        """Repaints just the surfaces showing this article's send control. Nothing here
+        changes filter membership or sort order, so the full-list rebuild that
+        _refresh_after_workflow_change() exists to decide on is never needed."""
+        _get_row_refreshable(aid).refresh()
+        if state.get('selected') == aid:
+            render_reader.refresh()
 
     # ---------- bulk actions ----------
 
@@ -1399,12 +1451,20 @@ def build():
                         'width:28px;height:28px;display:flex;align-items:center;justify-content:center'
                 ).mark(f'sending-{aid}'):
                     ui.spinner(size='xs').style(f'color:{theme.PURPLE}')
-            elif wf.get('plane_issue_id'):
-                # Inert on purpose: the to-do already exists, and a second send would
-                # duplicate it rather than update it.
+            elif aid in state['verifying_ids']:
                 with ui.element('div').style(
                         'width:28px;height:28px;display:flex;align-items:center;justify-content:center'
-                ).mark(f'sent-icon-{aid}').tooltip('Already sent to HomeLab'):
+                ).mark(f'verifying-{aid}'):
+                    ui.spinner(size='xs').style(f'color:{theme.GREEN}')
+            elif wf.get('plane_issue_id'):
+                # Still not a resend -- that would duplicate the to-do rather than update
+                # it. Clicking re-checks Plane instead, which is the only way back if the
+                # to-do was deleted there (see verify_plane_todo()).
+                with ui.element('div').classes('cursor-pointer').style(
+                        'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
+                        'justify-content:center'
+                ).on('click', lambda _, i=aid: verify_plane_todo(i)).mark(
+                        f'sent-icon-{aid}').tooltip('Sent to HomeLab — click to re-check it still exists'):
                     ui.icon('fa-solid fa-check').style(f'font-size:12.5px;color:{theme.GREEN}')
             else:
                 with ui.element('div').classes('cursor-pointer').style(
@@ -1683,11 +1743,19 @@ def build():
                             'width:28px;height:28px;display:flex;align-items:center;justify-content:center'
                     ).mark(f'reader-sending-{aid}'):
                         ui.spinner(size='xs').style(f'color:{theme.PURPLE}')
-                elif wf.get('plane_issue_id'):
+                elif aid in state['verifying_ids']:
                     with ui.element('div').style(
                             'width:28px;height:28px;display:flex;align-items:center;'
                             'justify-content:center'
-                    ).mark(f'reader-sent-icon-{aid}').tooltip('Already sent to HomeLab'):
+                    ).mark(f'reader-verifying-{aid}'):
+                        ui.spinner(size='xs').style(f'color:{theme.GREEN}')
+                elif wf.get('plane_issue_id'):
+                    with ui.element('div').classes('cursor-pointer').style(
+                            'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
+                            'justify-content:center'
+                    ).on('click', lambda _, i=aid: verify_plane_todo(i)).mark(
+                            f'reader-sent-icon-{aid}').tooltip(
+                            'Sent to HomeLab — click to re-check it still exists'):
                         ui.icon('fa-solid fa-check').style(f'font-size:12.5px;color:{theme.GREEN}')
                 else:
                     with ui.element('div').classes('cursor-pointer').style(

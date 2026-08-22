@@ -108,10 +108,35 @@ def send_article_to_plane(article: dict, summary: str) -> dict:
 
 def _issue_exists(issue_id: str | None) -> bool:
     """True if Plane can still hand back the issue we were just told it created."""
+    return issue_status(issue_id) == 'present'
+
+
+def issue_status(issue_id: str | None) -> str:
+    """'present' | 'gone' | 'unknown' for an issue id we recorded earlier.
+
+    Deliberately three-valued rather than a bool. Confirming a create can collapse
+    everything that is not a 200 into "not confirmed" safely -- the worst case there is an
+    id recorded without a tick. Reconciling cannot: it acts on the answer by *deleting*
+    the article's only link to its to-do, so reading a timeout or a 502 as "deleted" would
+    throw away a live to-do every time Plane restarts. Only a 404 -- Plane positively
+    stating it has no such issue -- is allowed to mean gone; everything else is unknown
+    and changes nothing.
+    """
     if not issue_id:
-        return False
+        return 'gone'
+    if not all([PLANE_API_KEY, PLANE_API_URL, PLANE_WORKSPACE_SLUG, PLANE_PROJECT_ID]):
+        return 'unknown'
     try:
         resp = requests.get(f"{_base_url()}/issues/{issue_id}/", headers=_headers(), timeout=15)
-        return resp.status_code == 200 and resp.json().get('id') == issue_id
     except requests.RequestException:
-        return False
+        return 'unknown'
+    if resp.status_code == 404:
+        return 'gone'
+    if resp.status_code == 200:
+        try:
+            # A 200 carrying some other id is not an answer about this one -- don't act.
+            return 'present' if resp.json().get('id') == issue_id else 'unknown'
+        except ValueError:
+            return 'unknown'
+    return 'unknown'  # 401/403/5xx: Plane is not saying the issue is gone, only that it
+                      # will not answer right now.

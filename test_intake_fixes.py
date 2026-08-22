@@ -854,8 +854,9 @@ def test_load_tag_vocabulary_keeps_file_order(tmp_path, monkeypatch):
 @pytest.mark.nicegui_main_file('test_intake_fixes.py')
 async def test_already_sent_article_shows_a_checkmark_not_a_send_button(user: User, isolated_intake):
     """A recorded plane_issue_id is what marks an article as already filed. The control
-    has to render as an inert checkmark rather than a live send button -- a second send
-    creates a second to-do rather than updating the first."""
+    has to render as a checkmark rather than a live send button -- a second send creates a
+    second to-do rather than updating the first. (The checkmark is clickable, but it
+    re-checks Plane; it never sends. See the verify tests below.)"""
     aid = '2026-07-30-235959-new-article.md'
     state_file = isolated_intake['state_file']
     state_file.write_text(json.dumps({
@@ -953,3 +954,114 @@ def test_send_reports_unexpected_errors_instead_of_raising(monkeypatch):
     result = plane_service.send_article_to_plane({'id': 'a.md'}, 'summary')  # no 'title'
     assert result['created'] is False
     assert 'KeyError' in result['error']
+
+
+# ---------- reconciling a recorded to-do against Plane ----------
+
+def test_issue_status_calls_only_a_404_gone(monkeypatch):
+    """404 is Plane positively stating it has no such issue -- the one answer that may
+    clear an article's only link to its to-do."""
+    _stub_plane(monkeypatch,
+                post=lambda *a, **kw: _FakeResponse(201, {}),
+                get=lambda *a, **kw: _FakeResponse(404, {}))
+    assert plane_service.issue_status('some-id') == 'gone'
+
+
+def test_issue_status_confirms_a_live_issue(monkeypatch):
+    _stub_plane(monkeypatch,
+                post=lambda *a, **kw: _FakeResponse(201, {}),
+                get=lambda *a, **kw: _FakeResponse(200, {'id': 'some-id'}))
+    assert plane_service.issue_status('some-id') == 'present'
+
+
+def test_issue_status_never_reports_gone_when_plane_cannot_answer(monkeypatch):
+    """The whole point of the three-valued return: an outage must not read as "deleted",
+    or every restart of Plane would wipe the checkmarks off live to-dos."""
+    for code in (401, 403, 429, 500, 502, 503):
+        _stub_plane(monkeypatch,
+                    post=lambda *a, **kw: _FakeResponse(201, {}),
+                    get=lambda *a, c=code, **kw: _FakeResponse(c, {}))
+        assert plane_service.issue_status('some-id') == 'unknown', code
+
+    def _boom(*a, **kw):
+        raise Exception('connection refused')
+
+    _stub_plane(monkeypatch, post=lambda *a, **kw: _FakeResponse(201, {}), get=_boom)
+    assert plane_service.issue_status('some-id') == 'unknown'
+
+    # A 200 about some other issue is not an answer about this one either.
+    _stub_plane(monkeypatch,
+                post=lambda *a, **kw: _FakeResponse(201, {}),
+                get=lambda *a, **kw: _FakeResponse(200, {'id': 'a-different-issue'}))
+    assert plane_service.issue_status('some-id') == 'unknown'
+
+
+def _already_filed_state(state_file, aid, issue_id='already-filed-id'):
+    state_file.write_text(json.dumps({
+        'articles': {aid: {'read': False, 'favorite': False, 'archived': False,
+                           'plane_issue_id': issue_id}},
+        'folders': [], 'prefs': {'density': 'cozy', 'sort': 'unread'},
+    }))
+
+
+def _recorded_issue_id(state_file, aid):
+    return json.loads(state_file.read_text()).get('articles', {}).get(aid, {}).get('plane_issue_id')
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_clicking_the_checkmark_clears_a_todo_deleted_in_plane(
+        user: User, isolated_intake, monkeypatch):
+    """The checkmark was a one-way door: plane_issue_id was written on a successful send
+    and cleared nowhere, while the control it drives refuses to resend. Deleting the to-do
+    in Plane left the article permanently unsendable short of editing intake_state.json."""
+    aid = '2026-07-30-235959-new-article.md'
+    state_file = isolated_intake['state_file']
+    _already_filed_state(state_file, aid)
+    monkeypatch.setattr(plane_service, 'issue_status', lambda _id: 'gone')
+
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    user.find(marker=f'sent-icon-{aid}').click()
+
+    cleared = await _wait_until(lambda: _recorded_issue_id(state_file, aid) is None)
+    assert cleared, f'plane_issue_id was not cleared: {state_file.read_text()!r}'
+    # ...and the send control comes back, which is the part that actually unsticks it.
+    await user.should_see(marker=f'send-icon-{aid}', retries=10)
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_checkmark_survives_a_verify_against_a_live_todo(
+        user: User, isolated_intake, monkeypatch):
+    aid = '2026-07-30-235959-new-article.md'
+    state_file = isolated_intake['state_file']
+    _already_filed_state(state_file, aid)
+    monkeypatch.setattr(plane_service, 'issue_status', lambda _id: 'present')
+
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    user.find(marker=f'sent-icon-{aid}').click()
+    await asyncio.sleep(0.3)
+
+    assert _recorded_issue_id(state_file, aid) == 'already-filed-id'
+    await user.should_see(marker=f'sent-icon-{aid}')
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_an_unreachable_plane_leaves_the_checkmark_alone(
+        user: User, isolated_intake, monkeypatch):
+    """Fail closed: an unreachable Plane must not be read as "the to-do was deleted" and
+    strip the article's link to a to-do that is still sitting there."""
+    aid = '2026-07-30-235959-new-article.md'
+    state_file = isolated_intake['state_file']
+    _already_filed_state(state_file, aid)
+    monkeypatch.setattr(plane_service, 'issue_status', lambda _id: 'unknown')
+
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    user.find(marker=f'sent-icon-{aid}').click()
+    await asyncio.sleep(0.3)
+
+    assert _recorded_issue_id(state_file, aid) == 'already-filed-id'
+    await user.should_see(marker=f'sent-icon-{aid}')
+    with pytest.raises(AssertionError):
+        user.find(marker=f'send-icon-{aid}')

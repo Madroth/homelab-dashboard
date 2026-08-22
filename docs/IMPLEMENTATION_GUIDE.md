@@ -151,7 +151,14 @@ send_article_to_plane(article: dict, summary: str) -> dict
 #                   response) comes back here, because an exception escaping this function
 #                   skips the caller's refresh and toast and strands its spinner
 # Callers persist issue_id as intake_state's plane_issue_id, which is what makes the
-# row/reader control an inert checkmark and guards the `s` shortcut against a resend.
+# row/reader control a checkmark and guards the `s` shortcut against a resend.
+
+issue_status(issue_id: str | None) -> str    # 'present' | 'gone' | 'unknown'
+# Three-valued on purpose, and the only thing allowed to clear a plane_issue_id. A bool
+# would have to fold "Plane is down" in with "Plane says it deleted that", and acting on
+# that mistake deletes the article's only link to a live to-do -- so only a 404 counts as
+# gone; 401/403/5xx/timeouts are 'unknown' and change nothing. _issue_exists() is now a
+# thin `== 'present'` wrapper over it.
 
 # services/repo_search.py + services/ai/discuss.py -- backing the Discuss panel
 repo_search.repo_file_count() -> int

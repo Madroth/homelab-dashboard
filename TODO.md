@@ -88,7 +88,12 @@
   live Plane — plus a catch-all so nothing unexpected escapes the send and leaves the row's
   spinner turning forever). Suite green at 48; pushed and live on the running service as of
   2026-08-22. Still open here:
-  - [ ] Reconcile recorded `plane_issue_id`s against Plane so a to-do deleted there clears
-    the article's checkmark — today verification runs only at send time.
+  - [x] Reconcile recorded `plane_issue_id`s against Plane so a to-do deleted there clears
+    the article's checkmark. Clicking the checkmark re-checks that one to-do
+    (`plane.issue_status()`, three-valued so an unreachable Plane can never be read as
+    "deleted"); gone clears the flag and restores the send control. This also closed a
+    dead end the hardening pass had created: nothing cleared `plane_issue_id`, and the
+    control it drives refuses to resend, so a to-do deleted in Plane left the article
+    permanently unsendable short of hand-editing `intake_state.json`.
   - [ ] No project picker: every article goes to the one project in `.env`.
   - [ ] A sent article's to-do is write-once; nothing updates it afterwards.
