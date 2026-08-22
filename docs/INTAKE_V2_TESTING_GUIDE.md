@@ -1,7 +1,7 @@
 # Article Intake "Design v2" — Manual Testing Guide
 
 For Chris to drive in a real browser — everything below has only been verified
-headlessly (`test_intake_fixes.py`, 16 tests) plus a full 6-tab boot check against
+headlessly (`test_intake_fixes.py`, 48 tests) plus a full 6-tab boot check against
 real data. Nothing has actually been *looked at* yet.
 
 ## 0. Before you start
@@ -96,6 +96,9 @@ deliberately rather than just in passing.
       *immediately* (not after a delay), and it resolves to either a success toast
       (article becomes read + archived) or a failure toast. Check the actual Plane
       project to confirm the to-do was really created
+- [ ] After that send, the control is a **green checkmark** and no longer clickable
+      ("Already sent to HomeLab"). Reload the page — it's still a checkmark, and pressing
+      `s` on that article toasts "Already sent to HomeLab." instead of sending again
 - [ ] **Delete** (single row) — click it: the row's action icons should swap in
       place to "Delete? Yes / No" — **not** a popup/modal. Click No, confirms it
       cancels and the row returns to normal. Click Yes on a throwaway test article,

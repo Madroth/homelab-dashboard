@@ -2,7 +2,7 @@
 
 Code-verified inventory of every behavior, link, and visual on the Article Intake page
 (plus the global nav it lives in), derived directly from `pages/intake.py`,
-`components/discuss_panel.py`, and `components/nav_sidebar.py` as of commit `7e31358`.
+`components/discuss_panel.py`, and `components/nav_sidebar.py` as of commit `e0ea2ff`.
 
 **How to use:** check items off as they pass in a real browser. Log failures with what
 you did / expected / got. The companion `INTAKE_V2_TESTING_GUIDE.md` is the
@@ -12,7 +12,7 @@ code implements should appear here exactly once.
 **Legend:** every item is tagged **[B]** behavior · **[L]** link/navigation ·
 **[V]** visual/graphic.
 
-**Already verified headlessly** (16 tests in `test_intake_fixes.py`): date sorting +
+**Already verified headlessly** (48 tests in `test_intake_fixes.py`): date sorting +
 legacy-filename fallback, queue-file lock, archiving folder-scoping rules, single-row
 refresh pattern, delete cleanup, Discuss thread persistence. Headless ≠ looked-at:
 those items still appear below for a visual pass, marked ⚙ where the logic itself is
@@ -191,6 +191,16 @@ revisit alongside the dedicated tag-filter UI feature)
       read+archived) or a red failure toast
 - [ ] [L] After a successful send, the to-do actually exists in Plane (check the project)
 - [ ] [B] Re-clicking send while a send is in flight is ignored (no double to-do)
+- [ ] [V] Once sent, the control is a green checkmark, inert, tooltip "Already sent to
+      HomeLab" — the id is persisted as `plane_issue_id`, so it survives a reload
+- [ ] [B] The `s` shortcut on an already-sent article toasts "Already sent to HomeLab."
+      rather than filing a second to-do (the control is inert, the shortcut still fires)
+- [ ] [B] A send that reaches Plane but whose reply is lost does not duplicate: the resend
+      comes back "Already filed in HomeLab · linked to the existing to-do" (info toast,
+      Plane answers the repeated `external_id` with 409). Hard to stage by hand — covered
+      headlessly in `test_intake_fixes.py`
+- [ ] [B] A send that fails unexpectedly still resolves the spinner and shows the reason —
+      no row left spinning forever
 - [ ] [B] Delete: action strip swaps IN PLACE to "Delete? Yes / No" (inline, not a modal)
 - [ ] [B] Delete → No restores the normal icon strip
 - [ ] [B] Delete → Yes on a throwaway article: row disappears, article file really gone
@@ -275,7 +285,8 @@ revisit alongside the dedicated tag-filter UI feature)
 - [ ] [L] Open-original icon → source URL in a new tab (hidden when no source)
 - [ ] [B] Favorite / Archive toggles — reflect and update the same state as the list row
       (toggle in reader, confirm the list row's star/border updates too)
-- [ ] [B] Send to HomeLab — same spinner-in-slot + toast behavior as the list row
+- [ ] [B] Send to HomeLab — same spinner-in-slot + toast behavior as the list row,
+      including the inert checkmark once sent
 - [ ] [B] Resubmit — same toast/queue behavior as the row menu
 - [ ] [B] Delete → inline "Delete this article? Yes, delete / Cancel" (not a modal)
 - [ ] [V] There is deliberately NO flag-duplicate button in the reader (dropped

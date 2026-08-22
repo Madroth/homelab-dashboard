@@ -58,7 +58,7 @@ flowchart LR
     end
 
     subgraph HD["homelab-dashboard (owned here)"]
-        WF["intake_state.json<br/>read / favorite / archived / folders / prefs"]
+        WF["intake_state.json<br/>read / favorite / archived / plane_issue_id / folders / prefs"]
         CV["intake_conversations.json<br/>{messages, sources} per article"]
     end
 
@@ -317,10 +317,15 @@ a capture-phase listener, not a one-line addition to the existing handler.
 ## 8. Verification
 
 `test_intake_fixes.py` (pytest + `nicegui.testing.User`, isolated temp data — never
-the real article archive or real `intake_state.json`): 16 tests, covering the pure
+the real article archive or real `intake_state.json`): 48 tests as of `e0ea2ff`
+(16 when this section was first written), covering the pure
 sort/lock/migration logic plus page-level checks for duplicates-exclusion,
 density toggle, reader open/close, inline delete-confirm, the two archived-inclusion
 behaviors (Favorites and Duplicates) that were the core semantic decision this round,
-Send to HomeLab's in-flight state, and Discuss mode's repo-scope popover. A separate,
+Send to HomeLab's in-flight state, and Discuss mode's repo-scope popover. The
+2026-08-18 hardening pass added the Send to HomeLab service-contract cases on top:
+create/verify reported separately, the id persisted and read back, a 409 resend
+recovering the existing issue instead of duplicating it, and an unexpected error coming
+back as a result rather than raising. A separate,
 throwaway full-app boot check (all 6 tabs, real data, not part of the committed suite)
 confirmed the nav-sidebar restructure didn't regress the other 5 pages.

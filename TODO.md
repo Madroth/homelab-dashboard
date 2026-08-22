@@ -39,6 +39,45 @@
   - [ ] Link Radarr & Sonarr to qBittorrent via API keys.
   - [ ] Claim Plex server and configure library folders (`/data/media`).
   - [ ] Setup Discord/Telegram Webhook alerts inside Uptime Kuma.
+    (Note: Uptime Kuma is no longer part of the media stack — see the
+    monitoring item below. Its alerting is now gated on homelab-monitoring's
+    M1, which standardises on self-hosted ntfy rather than Discord/Telegram.)
+
+- [ ] **Monitoring / lab health home on the dashboard (2026-08-22)** — one place to see
+  whether the lab is healthy, rather than the pieces scattered across pages. Merged from
+  two notes written the same day: Chris's ask for a single health/status/usage/alerts/errors
+  surface, and the fallout from the Phase 0.7 move.
+
+  Uptime Kuma, Dozzle, socket-proxy and autoheal moved out of `media-curator`
+  into the `homelab-monitoring` project on 2026-08-22 (HomeLab BUILD_BACKLOG.md
+  Phase 0.7). The dashboard has no surface of its own for them: the only entry
+  point is the Uptime-Kuma quick-link parked on the **Media Curator** page
+  (`pages/media.py:28`, `static/index.html:209`), which now points at a service
+  that page no longer owns. Dozzle (`:8888`) has no link at all.
+
+  The other half already exists but only partly: `pages/system.py` renders
+  `services.system.get_status()` — a DEFCON list (mount down, <5% free, Gluetun collapsed,
+  media-curator inactive), `docker ps` container cards, `/mnt/Multimedia` disk usage, Plex's
+  memory line, and `get_logs()` for a log tail. Decide whether that page becomes this home
+  or sits beside it.
+  - [ ] Give monitoring its own section or page (Uptime Kuma `:3001` +
+        Dozzle `:8888`) rather than borrowing another project's page.
+  - [ ] Once it exists, decide whether the Media Curator quick-link stays as a
+        convenience or moves. Deliberately left working in the meantime —
+        removing it would have cost a shortcut and returned nothing.
+  - [ ] Lab health at a glance: one honest up/degraded/down verdict per service, not just
+        a container's own `Status` string — a running container is not a working service.
+  - [ ] System status beyond the media stack: host uptime, load, the other systemd units,
+        Tailscale reachability (Omega at `100.74.2.92`, the bridge service), NAS mount.
+  - [ ] Resource usage: host CPU / RAM / temps and per-container stats. `docker stats` is
+        only read for Plex today, and nothing is kept over time — no trend, so a slow leak
+        or a filling disk is invisible until it trips a DEFCON threshold.
+  - [ ] Notifications: somewhere alerts actually land and can be acknowledged. The DEFCON
+        banner only shows while you happen to be on the page, and Kuma's alerting is gated
+        on homelab-monitoring's M1 (self-hosted ntfy, not Discord/Telegram).
+  - [ ] Error reporting: a real surface for failures with the full text readable and
+        copyable — this is the general form of the intake failed-queue complaint above,
+        where the error survives only as a hover tooltip.
 
 - [ ] **Send to HomeLab — hardening (2026-08-18)** — full plan and findings live in
   `homelab-intake/TODO.md` ("Send to HomeLab + its support systems"); this is the
@@ -47,29 +86,9 @@
   issue id recorded + read back + checkmark, `ca6334c` idempotent resend via Plane's
   `external_id` — a repeat POST returns 409 with the id Plane already holds, proven against
   live Plane — plus a catch-all so nothing unexpected escapes the send and leaves the row's
-  spinner turning forever). Suite green at 48. **The running service is still on the old
-  code — it needs a restart to pick up `ca6334c`.** Still open here:
+  spinner turning forever). Suite green at 48; pushed and live on the running service as of
+  2026-08-22. Still open here:
   - [ ] Reconcile recorded `plane_issue_id`s against Plane so a to-do deleted there clears
     the article's checkmark — today verification runs only at send time.
   - [ ] No project picker: every article goes to the one project in `.env`.
   - [ ] A sent article's to-do is write-once; nothing updates it afterwards.
-
-- [ ] **Lab health / observability home (noted 2026-08-22, Chris)** — one place to see
-  whether the lab is healthy, rather than the pieces scattered across pages. Today
-  `pages/system.py` is the closest thing and only covers part of it: `services.system.get_status()`
-  returns a DEFCON list (mount down, <5% free, Gluetun collapsed, media-curator inactive),
-  `docker ps` container cards, `/mnt/Multimedia` disk usage, Plex's memory line, and
-  `get_logs()` for a log tail. Decide whether this becomes that page or sits beside it.
-  - [ ] Lab health at a glance: one honest up/degraded/down verdict per service, not just
-    a container's own `Status` string — a running container is not a working service.
-  - [ ] System status beyond the media stack: host uptime, load, the other systemd units,
-    Tailscale reachability (Omega at `100.74.2.92`, the bridge service), NAS mount.
-  - [ ] Resource usage: host CPU / RAM / temps and per-container stats. `docker stats` is
-    only read for Plex today, and nothing is kept over time — no trend, so a slow leak or a
-    filling disk is invisible until it trips a DEFCON threshold.
-  - [ ] Notifications: somewhere alerts actually land and can be acknowledged. The DEFCON
-    banner only shows while you happen to be on the page, and the Uptime Kuma
-    Discord/Telegram webhooks under Media Stack are still unconfigured.
-  - [ ] Error reporting: a real surface for failures with the full text readable and
-    copyable — this is the general form of the intake failed-queue complaint above, where
-    the error survives only as a hover tooltip.

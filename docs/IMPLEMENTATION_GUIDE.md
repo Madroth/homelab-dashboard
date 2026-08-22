@@ -121,7 +121,8 @@ search_articles_with_citations(question, top_k=5) -> tuple[str, list[dict]]   # 
 # services/intake_state.py -- dashboard-owned sidecar state (intake_state.json /
 # intake_conversations.json), NOT part of homelab-intake; every read-modify-write is
 # fcntl-locked + atomic (2026-07-31, see _file_lock()/_atomic_write())
-get_article_state(article_id: str) -> dict                   # {'read', 'favorite', 'archived'}
+get_article_state(article_id: str) -> dict                   # {'read', 'favorite', 'archived',
+                                                             #  'plane_issue_id'}
 all_article_states() -> dict                                 # {article_id: state}
 set_article_state(article_id: str, **fields) -> None
 bulk_set_article_state(article_ids: list[str], **fields) -> None
@@ -135,7 +136,22 @@ clear_thread(article_id: str) -> None
 thread_counts() -> dict                                        # {article_id: message_count}, list-row chip
 
 # services/plane.py -- "Send to HomeLab"
-send_article_to_plane(article: dict, summary: str) -> tuple[bool, str | None]
+send_article_to_plane(article: dict, summary: str) -> dict
+# {'created', 'verified', 'already_existed', 'issue_id', 'error'}. Was a (bool, str) tuple
+# until 2026-08-18; callers want all five, and conflating them cost real duplicate to-dos:
+#   created         Plane holds an issue for this article
+#   verified        a follow-up GET actually found it. Separate from created on purpose --
+#                   a read-back that fails after a successful create must NOT read as "not
+#                   sent", or the retry files a duplicate
+#   already_existed the article id is sent as Plane's external_id, so a repeat POST comes
+#                   back 409 carrying the id Plane already holds. That is the only defence
+#                   against a create whose response was lost: local state cannot tell that
+#                   apart from a create that failed
+#   error           never raises -- anything unexpected (malformed article, unreadable
+#                   response) comes back here, because an exception escaping this function
+#                   skips the caller's refresh and toast and strands its spinner
+# Callers persist issue_id as intake_state's plane_issue_id, which is what makes the
+# row/reader control an inert checkmark and guards the `s` shortcut against a resend.
 
 # services/repo_search.py + services/ai/discuss.py -- backing the Discuss panel
 repo_search.repo_file_count() -> int
