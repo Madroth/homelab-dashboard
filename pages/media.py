@@ -25,7 +25,6 @@ QUICK_LINKS = [
     ('fa-solid fa-closed-captioning', 'Bazarr', 'http://100.87.245.107:6767'),
     ('fa-solid fa-chart-simple', 'Tautulli', 'http://100.87.245.107:8181'),
     ('fa-solid fa-list-check', 'Pulsarr', 'http://100.87.245.107:3003'),
-    ('fa-solid fa-heart-pulse', 'Uptime-Kuma', 'http://100.87.245.107:3001'),
     ('fa-solid fa-download', 'qBittorrent', 'http://100.87.245.107:8090'),
     ('fa-solid fa-play', 'Plex', 'http://100.87.245.107:32400/web'),
 ]

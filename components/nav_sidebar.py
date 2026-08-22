@@ -16,7 +16,7 @@ NAV_GROUPS = [
         ('media', 'fa-solid fa-photo-film', 'Media Curator', None),
     ]),
     ('INFRASTRUCTURE', [
-        ('system', 'fa-solid fa-heart-pulse', 'System Status', None),
+        ('system', 'fa-solid fa-heart-pulse', 'Lab Health', None),
         (None, 'fa-solid fa-boxes-stacked', 'Containers', None),
         (None, 'fa-solid fa-network-wired', 'Network', None),
         ('settings', 'fa-solid fa-gear', 'Settings', None),

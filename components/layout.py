@@ -2,7 +2,7 @@ from fastapi import Request
 from nicegui import ui
 
 from components import ai_context, chat_sidebar, live_state, nav_sidebar, theme
-from pages import home, intake, media, mods, settings, system
+from pages import home, intake, lab_health, media, mods, settings
 
 TAB_PAGES = {
     'home': home.build,
@@ -10,7 +10,7 @@ TAB_PAGES = {
     'mods': mods.build,
     'media': media.build,
     'settings': settings.build,
-    'system': system.build,
+    'system': lab_health.build,
 }
 
 
