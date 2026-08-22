@@ -104,16 +104,22 @@
   further. P0–P3 are all derived-on-read from this box (docker / systemd / /proc / journald)
   and depend on `homelab-monitoring` for nothing; only P4 waits.
 
-  What does NOT wait — build these two:
-  - [ ] Phase 0.8, explicitly ungated ("not a monitor, so M1 does not gate it"): monitoring
-        gets a home with Uptime Kuma `:3001` and Dozzle `:8888`, and the Media Curator
-        quick-link decision gets recorded either way.
-  - [ ] The floor, all computable today with no monitoring system: failed units
-        (`systemctl list-units --state=failed`, both managers), mount truth
-        (`os.path.ismount`), container health (`docker ps -a`), capacity
-        (`shutil.disk_usage`). `services/system.py` already does three of the four. Not
-        hypothetical — `plane-backup.service`, `livescore.service` and
-        `snap.tailscale.tailscaled.service` are failed right now and nothing says so.
+  What does NOT wait:
+  - [x] **Phase 0.8 — done `ba101fa`.** Monitoring has its own home: the System Status tab
+        became **Lab Health** (`pages/lab_health.py`, tab key still `system` so `?tab=`
+        links survive), linking Uptime Kuma `:3001`, Dozzle `:8888` and ntfy `:5001`.
+        The Kuma quick-link **moved off Media Curator** — Chris's call, 2026-08-22: it is
+        not a media service and that stack stopped owning it at Phase 0.7. (`static/index.html`
+        still has a Kuma link at :209, deliberately untouched — that file is dead legacy.)
+  - [x] **F1 error stream + F4 units — done `ba101fa`.** journald errors from both managers,
+        every failed unit, and containers exited non-zero, merged and collapsed by repeat;
+        click for the full copyable text plus the command to dig further. Units list with
+        state, restarts and a per-unit log tail. All readers fail closed (`{'ok': ...}`),
+        so an unreadable source renders as "cannot tell", never as a quieter list.
+        Suite 73 green.
+  - [ ] Next from `LAB_HEALTH_FEATURES.md`: **F2** (container detail — health, live stats
+        from `docker stats`, ports, mounts, logs) and **F3** (host resources — CPU/PSI,
+        memory, disks, temps, each clickable). Both derived-on-read, nothing blocks them.
 
 - [ ] **Send to HomeLab — hardening (2026-08-18)** — full plan and findings live in
   `homelab-intake/TODO.md` ("Send to HomeLab + its support systems"); this is the
