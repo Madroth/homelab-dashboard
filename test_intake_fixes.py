@@ -211,7 +211,7 @@ def isolated_intake(tmp_path, monkeypatch):
         with open(call_log, 'a') as f:
             f.write(f'called with {article.get("id")}\n')
         time.sleep(0.3)
-        return {'created': True, 'verified': True,
+        return {'created': True, 'verified': True, 'already_existed': False,
                 'issue_id': 'stub-issue-id', 'error': None}
 
     monkeypatch.setattr(plane_service, 'send_article_to_plane', _delayed_send)
@@ -904,7 +904,8 @@ def test_send_marks_verified_when_the_issue_reads_back(monkeypatch):
                 post=lambda *a, **kw: _FakeResponse(201, {'id': 'new-issue'}),
                 get=lambda *a, **kw: _FakeResponse(200, {'id': 'new-issue'}))
     result = plane_service.send_article_to_plane({'title': 'T', 'source': 'https://x/'}, 'summary')
-    assert result == {'created': True, 'verified': True, 'issue_id': 'new-issue', 'error': None}
+    assert result == {'created': True, 'verified': True, 'already_existed': False,
+                      'issue_id': 'new-issue', 'error': None}
 
 
 def test_send_keeps_the_issue_id_when_the_read_back_fails(monkeypatch):
@@ -927,3 +928,28 @@ def test_send_reports_failure_when_plane_rejects_the_create(monkeypatch):
     assert result['created'] is False
     assert result['issue_id'] is None
     assert '403' in result['error']
+
+
+def test_resend_recovers_the_existing_issue_instead_of_duplicating(monkeypatch):
+    """Plane answers a repeat external_id with 409 and the id it already holds. That is the
+    only defence against a create whose response was lost: local state cannot tell a failed
+    create from a successful one whose reply never arrived."""
+    _stub_plane(monkeypatch,
+                post=lambda *a, **kw: _FakeResponse(409, {'id': 'existing-issue'}),
+                get=lambda *a, **kw: _FakeResponse(200, {'id': 'existing-issue'}))
+    result = plane_service.send_article_to_plane(
+        {'id': 'a.md', 'title': 'T', 'source': 'https://x/'}, 'summary')
+    assert result['created'] is True
+    assert result['already_existed'] is True
+    assert result['issue_id'] == 'existing-issue'
+
+
+def test_send_reports_unexpected_errors_instead_of_raising(monkeypatch):
+    """A malformed article used to raise straight out of the service, skipping the caller's
+    refresh and toast and leaving its spinner turning with the reason only in the log."""
+    _stub_plane(monkeypatch,
+                post=lambda *a, **kw: _FakeResponse(201, {'id': 'x'}),
+                get=lambda *a, **kw: _FakeResponse(200, {'id': 'x'}))
+    result = plane_service.send_article_to_plane({'id': 'a.md'}, 'summary')  # no 'title'
+    assert result['created'] is False
+    assert 'KeyError' in result['error']

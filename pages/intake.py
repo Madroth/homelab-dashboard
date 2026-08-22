@@ -480,9 +480,16 @@ def build():
             data = await run.io_bound(intake.get_article, aid)
             summary = (data.get('summary') if data else '') or art.get('why_it_matters') or art.get('snippet') or ''
             result = await run.io_bound(plane.send_article_to_plane, art, summary)
+        except Exception as e:  # noqa: BLE001 -- see below
+            # Anything escaping here would skip every refresh and toast past this point,
+            # leaving the row's spinner turning forever with the reason only in the service
+            # log. Funnel it into the normal failure result instead so the UI still resolves.
+            result = {'created': False, 'verified': False, 'issue_id': None,
+                      'already_existed': False, 'error': f'{type(e).__name__}: {e}'}
         finally:
             state['sending_ids'].discard(aid)
         if result is None:
+            # run.io_bound yields None when its work was cancelled (tab closed mid-send).
             if client_alive(client):
                 render_articles.refresh()
                 if state.get('selected') == aid:
@@ -504,7 +511,12 @@ def build():
                 live_state.refresh_all(exclude='intake', client=client)
                 if state.get('selected') == aid:
                     render_reader.refresh()
-                if result['verified']:
+                if result['already_existed']:
+                    # Plane already had an issue under this article's external_id -- a
+                    # resend recovered it rather than duplicating it.
+                    notify_on(client, 'Already filed in HomeLab · linked to the existing to-do.',
+                              type='info')
+                elif result['verified']:
                     notify_on(client, 'Sent to HomeLab · to-do created, article archived.',
                               type='positive')
                 else:
