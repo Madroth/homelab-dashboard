@@ -18,7 +18,7 @@
   - [ ] Decide on presentation (filter chips, tag cloud, etc.) alongside the existing Homelab/News/Errors folder sidebar.
 
 - [ ] **Article Intake — investigate (noted 2026-08-04, from Chris's live testing)**
-  - [ ] Reader's action icons go stale after workflow toggles: clicking Favorite (from
+  - [x] **Fixed `a329de8`.** Reader's action icons went stale after workflow toggles: clicking Favorite (from
     either the list row or the reader itself) updates the list row's highlight
     immediately, but the reader pane's own star doesn't repaint until something else
     rebuilds the reader (switching articles, opening Discuss, etc.). Cause is visible in
@@ -27,12 +27,14 @@
     when the toggled article is the one open in the reader. State on disk is always
     correct — purely a repaint gap. Applies to the reader's Read/Archive icons too, and
     now also bites in Discuss mode since the action row shows there as well (2026-08-04
-    change). DON'T fix blind: Chris is mid-testing and collecting more behavior notes —
-    batch them, then investigate together.
-  - [ ] Failed queue entries give no way to read/copy the error: clicking the entry
+    change). Fixed inside `_refresh_after_workflow_change()` rather than in each of the
+    three toggles, so a fourth cannot forget it. Two regression tests, both confirmed
+    failing against the old code.
+  - [x] **Fixed `a329de8`.** Failed queue entries gave no way to read/copy the error: clicking the entry
     just retries it, and the error text only exists as a hover tooltip ("RETRY n/3").
-    Chris wants to be able to see and copy/paste the full error. (Noted 2026-08-04
-    while triaging the Omega-unreachable failures below.)
+    Clicking now opens the full text — selectable, copyable, with the attempt count —
+    and Retry moved one click further in. (Noted 2026-08-04 while triaging the
+    Omega-unreachable failures.)
 
 - [ ] **Media Stack (Frontend & GUI Config)**
   - [ ] Connect Prowlarr indexers to Radarr & Sonarr.
@@ -117,9 +119,15 @@
         state, restarts and a per-unit log tail. All readers fail closed (`{'ok': ...}`),
         so an unreadable source renders as "cannot tell", never as a quieter list.
         Suite 73 green.
-  - [ ] Next from `LAB_HEALTH_FEATURES.md`: **F2** (container detail — health, live stats
-        from `docker stats`, ports, mounts, logs) and **F3** (host resources — CPU/PSI,
-        memory, disks, temps, each clickable). Both derived-on-read, nothing blocks them.
+  - [x] **F2 + F3 — done `2bf4b9c`.** P0 is complete. Containers group by compose project
+        and open to state, their own healthcheck verdict, live `docker stats`, ports, mounts,
+        output and a Dozzle link. Resources replaced the old three-card grid: CPU load,
+        memory, disks and temperature, each clickable, with kernel pressure (PSI) on CPU and
+        memory and swap exhaustion leading the memory card. Every card has a "cannot tell"
+        face. Suite 100 green.
+  - [ ] Next from `LAB_HEALTH_FEATURES.md`: P1 (freshness stamps, search/filter across
+        everything) and P2 (correlation window, the bounded ring buffer for short-window
+        rates). Nothing blocks either.
 
 - [ ] **Send to HomeLab — hardening (2026-08-18)** — full plan and findings live in
   `homelab-intake/TODO.md` ("Send to HomeLab + its support systems"); this is the
@@ -166,15 +174,19 @@
         moved back before the error is reported, the connection closes on every path, and a
         failure to restore says so naming both paths rather than stranding the file silently.
         (Found by agy's 2026-08-22 review of the week; confirmed against the code.)
-  - [ ] Tests: `services/media.py` now has 4 (`test_media_fixes.py`, covering undo's ordering
-        guarantee against a real partial index). **`pages/media.py` still has none** — the page
-        layer is untested and is the other half of the exposed surface.
+  - [x] **Tests — `a329de8`.** The "zero tests" note was wrong: `pages/media.py` already had
+        5 page-level tests. Added 3 more covering the gap that mattered — a service failure
+        reaching the user rather than arriving as nothing — plus the 4 undo tests on the
+        service side. `test_media_fixes.py` is at 12.
+  - [ ] Still thin: nothing covers `reclassify()` or the Rejected folder.
   - [ ] Decide whether this stays an import-the-internals arrangement or gets a real boundary.
         Recorded as tech debt in media-curator's EPICS Epic 7; nobody owns it yet.
 
-- [ ] **`test_toggle_select_timing_with_large_queue` is flaky (2026-08-22)** — it asserts a
+- [x] **Fixed `a329de8` — `test_toggle_select_timing_with_large_queue` was flaky (2026-08-22)** — it asserts a
   wall-clock budget (`< 0.5s`) and fails intermittently on a loaded machine. Measured on clean
   `HEAD`, unrelated to any change: 2 of 3 consecutive runs failed. A timing threshold in a test
   suite that shares a host with a game server and a media daemon will keep doing this. Either
   raise the budget substantially, mark it as a benchmark that does not gate the suite, or
-  measure work done rather than seconds elapsed.
+  measure work done rather than seconds elapsed. **Took the third option:** it is now
+  `test_toggle_select_rebuilds_one_row_not_the_whole_queue`, asserting via element identity
+  that the toggled row was rebuilt and the other 79 were not. Five consecutive green runs.
