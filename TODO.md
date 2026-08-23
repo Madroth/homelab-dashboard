@@ -159,12 +159,15 @@
   - Two new statuses exist: `superseded` and `rejected_kept`. `static/app.js` filters explicitly on
     `'pending'`/`'approved'`, so neither renders in the active list — correct by luck, not design.
 
-  - [ ] **`undo()` in `services/media.py` needs a look.** It does
-        `UPDATE media_queue SET status="pending", original_path=?` with a flattened
-        `DROP_ZONE/original_filename` path. Under the old unique index a collision raised
-        `IntegrityError` loudly; it can now violate the new *partial* index instead, which is still
-        the right outcome, but `undo()` has no handler and would 500. Reachable from a button.
-  - [ ] Give `pages/media.py` and `services/media.py` some tests — there are none, and they are the
-        surface most exposed to the coupling above.
+  - [x] **`undo()` fixed — `93aaaa4`.** It was worse than "would 500": the file moved
+        *before* the unguarded `UPDATE`, so an `IntegrityError` against the new partial index
+        left the file in the drop zone while the row still said approved at `proposed_path` —
+        filesystem and database permanently out of sync, from a button press. The file is now
+        moved back before the error is reported, the connection closes on every path, and a
+        failure to restore says so naming both paths rather than stranding the file silently.
+        (Found by agy's 2026-08-22 review of the week; confirmed against the code.)
+  - [ ] Tests: `services/media.py` now has 4 (`test_media_fixes.py`, covering undo's ordering
+        guarantee against a real partial index). **`pages/media.py` still has none** — the page
+        layer is untested and is the other half of the exposed surface.
   - [ ] Decide whether this stays an import-the-internals arrangement or gets a real boundary.
         Recorded as tech debt in media-curator's EPICS Epic 7; nobody owns it yet.
