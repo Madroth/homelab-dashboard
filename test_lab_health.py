@@ -233,3 +233,92 @@ def test_media_page_no_longer_links_uptime_kuma():
     labels = [label for _, label, _ in media.QUICK_LINKS]
     assert 'Uptime-Kuma' not in labels
     assert 'Plex' in labels   # the real media links are untouched
+
+
+# ---------- get_status(): the two inherited fail-open paths ----------
+
+def test_docker_failure_keeps_the_reason_and_raises_defcon(monkeypatch):
+    """An empty container list and 'docker did not answer' are different answers. The
+    old code returned [] with the reason discarded, so an unreachable daemon and an
+    idle host rendered identically -- and neither raised the banner."""
+    def boom(*a, **kw):
+        raise OSError('docker daemon not reachable')
+    monkeypatch.setattr(system_service.subprocess, 'check_output', boom)
+    monkeypatch.setattr(system_service.os.path, 'ismount', lambda p: True)
+    monkeypatch.setattr(system_service, '_status_cache', {'time': 0.0, 'status': None})
+
+    status = system_service.get_status()
+    assert status['containers'] == []
+    assert 'not reachable' in status['containers_error']
+    assert any('DOCKER_UNREACHABLE' in d for d in status['defcon'])
+
+
+def test_unknown_daemon_state_still_raises_defcon(monkeypatch):
+    """The subtlest one: if systemctl raised, the old code set daemon_active False and
+    stopped -- the daemon read as dead AND the alert saying so went missing. Not being
+    able to tell is its own alert; the one thing it must never do is go quiet."""
+    def boom(*a, **kw):
+        raise FileNotFoundError('systemctl missing')
+    monkeypatch.setattr(system_service.subprocess, 'run', boom)
+    monkeypatch.setattr(system_service.subprocess, 'check_output', lambda *a, **kw: '')
+    monkeypatch.setattr(system_service.os.path, 'ismount', lambda p: True)
+    monkeypatch.setattr(system_service, '_status_cache', {'time': 0.0, 'status': None})
+
+    status = system_service.get_status()
+    assert status['daemon_active'] is False
+    assert any('DAEMON_UNKNOWN' in d for d in status['defcon']), \
+        'a daemon whose state cannot be read must not fail silently'
+
+
+# ---------- grouping key ----------
+
+def test_repeats_group_despite_a_changing_pid_or_byte_count():
+    """Exact-string grouping never folds a message carrying a pid, an address or a
+    timeout, so fifty OOM kills stayed fifty rows."""
+    now = time.time()
+    entries = [
+        {'source': 'journal-system', 'origin': 'kernel', 'at': now - 300, 'severity': 'error',
+         'message': 'CIFS: VFS: has not responded in 180 seconds. Reconnecting...', 'detail': {}},
+        {'source': 'journal-system', 'origin': 'kernel', 'at': now - 60, 'severity': 'error',
+         'message': 'CIFS: VFS: has not responded in 240 seconds. Reconnecting...', 'detail': {}},
+    ]
+    out = system_service._collapse(entries)
+    assert len(out) == 1
+    assert out[0]['count'] == 2
+    # the row shows the newest REAL text, not the normalised key
+    assert '240 seconds' in out[0]['message']
+
+
+def test_grouping_keeps_genuinely_different_subjects_apart():
+    """Single digits are left alone on purpose: GPC1 and GPC2 are different units,
+    while a pid is the same error wearing a different number."""
+    now = time.time()
+    entries = [
+        {'source': 'journal-system', 'origin': 'kernel', 'at': now, 'severity': 'error',
+         'message': 'nouveau: GPC1/PROP trap', 'detail': {}},
+        {'source': 'journal-system', 'origin': 'kernel', 'at': now, 'severity': 'error',
+         'message': 'nouveau: GPC2/PROP trap', 'detail': {}},
+    ]
+    assert len(system_service._collapse(entries)) == 2
+
+
+def test_message_id_groups_entries_whose_text_differs_entirely():
+    """journald's MESSAGE_ID is exact where it exists -- roughly a fifth of this host's
+    error entries -- and beats any amount of text normalising."""
+    now = time.time()
+    entries = [
+        {'source': 'journal-user', 'origin': 'a.service', 'at': now - 10, 'severity': 'error',
+         'message': 'totally different wording here', 'detail': {},
+         'message_id': 'be02cf6855d2428ba40df7e9d022f03d'},
+        {'source': 'journal-user', 'origin': 'a.service', 'at': now, 'severity': 'error',
+         'message': 'and something else again', 'detail': {},
+         'message_id': 'be02cf6855d2428ba40df7e9d022f03d'},
+    ]
+    out = system_service._collapse(entries)
+    assert len(out) == 1 and out[0]['count'] == 2
+
+
+def test_normalise_leaves_the_displayed_message_untouched():
+    assert system_service._normalise_message('pid [12345] failed at 0xdeadbeef after 90s') == \
+        'pid [N] failed at 0xN after Ns'
+    assert system_service._normalise_message('disk 1 offline') == 'disk 1 offline'

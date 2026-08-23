@@ -512,7 +512,12 @@ def build():
                 live_state.refresh_all(exclude='intake', client=client)
                 if state.get('selected') == aid:
                     render_reader.refresh()
-                if result['already_existed']:
+                if result['already_existed'] and not result['issue_id']:
+                    # Plane confirmed the duplicate but would not say which issue it is,
+                    # so nothing got linked. Saying "linked" here would be a plain lie.
+                    notify_on(client, 'Already filed in HomeLab, but the to-do could not be '
+                                      'identified — nothing was linked.', type='warning')
+                elif result['already_existed']:
                     # Plane already had an issue under this article's external_id -- a
                     # resend recovered it rather than duplicating it.
                     notify_on(client, 'Already filed in HomeLab · linked to the existing to-do.',

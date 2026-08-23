@@ -153,3 +153,134 @@ async def test_toggle_select_timing_with_large_queue(user: User, monkeypatch):
     t1 = time.time()
     print(f'\n\nMEDIA TOGGLE_SELECT (80 items) TOOK {t1 - t0:.3f}s\n\n')
     assert t1 - t0 < 0.5
+
+
+# ---------- undo(): the filesystem and the database must move together ----------
+#
+# services/media.py imports media-curator's internals over sys.path with no version
+# pin. That repo dropped its UNIQUE index on original_path for a PARTIAL unique index
+# over (original_path, file_hash) scoped to pending rows -- so undo(), which writes
+# original_path while flipping status back to 'pending', can now raise IntegrityError
+# where it previously could not. These tests pin the ordering guarantee rather than
+# the index: whatever the database rejects, the file must not be left moved.
+
+import os
+import sqlite3
+
+
+def _undo_db(tmp_path, *, original_path, proposed_path):
+    """A stand-in queue.db carrying media-curator's new partial unique index. Returns the
+    path: undo() closes whatever connection it is handed, so every caller opens its own."""
+    path = tmp_path / 'queue.db'
+    db = sqlite3.connect(path)
+    db.execute("""CREATE TABLE media_queue (id TEXT PRIMARY KEY, status TEXT,
+                  original_path TEXT, proposed_path TEXT, original_filename TEXT,
+                  file_hash TEXT, needs_intervention INTEGER DEFAULT 0)""")
+    db.execute("""CREATE UNIQUE INDEX idx_pending ON media_queue(original_path, file_hash)
+                  WHERE status = 'pending' """)
+    db.execute('INSERT INTO media_queue VALUES (?,?,?,?,?,?,?)',
+               ('item-1', 'approved', original_path, proposed_path, 'movie.mkv', 'hash-a', 0))
+    db.commit()
+    db.close()
+    return path
+
+
+def _open(path):
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _add_pending(path, original_path):
+    """A pending row already occupying the (original_path, file_hash) an undo will claim
+    -- exactly what media-curator's new partial index forbids."""
+    db = _open(path)
+    db.execute('INSERT INTO media_queue VALUES (?,?,?,?,?,?,?)',
+               ('item-2', 'pending', original_path, '/x', 'movie.mkv', 'hash-a', 0))
+    db.commit()
+    db.close()
+
+
+def _row(path, item_id='item-1'):
+    db = _open(path)
+    row = db.execute('SELECT * FROM media_queue WHERE id=?', (item_id,)).fetchone()
+    db.close()
+    return row
+
+
+@pytest.fixture
+def undo_env(tmp_path, monkeypatch):
+    """Real files and a real sqlite database in tmp_path, with DROP_ZONE pointed at it.
+    Nothing here can reach the real queue.db or the real drop zone."""
+    drop_zone = tmp_path / 'drop'
+    library = tmp_path / 'library'
+    drop_zone.mkdir()
+    library.mkdir()
+    proposed = library / 'Movie (2026).mkv'
+    proposed.write_text('the file')
+
+    fake_daemon = type('m', (), {'DROP_ZONE': str(drop_zone)})
+    monkeypatch.setitem(__import__('sys').modules, 'curator_daemon', fake_daemon)
+    return {'tmp_path': tmp_path, 'drop_zone': drop_zone, 'proposed': proposed,
+            'dest': drop_zone / 'movie.mkv'}
+
+
+def test_undo_moves_the_file_and_requeues_the_row(undo_env, monkeypatch):
+    path = _undo_db(undo_env['tmp_path'], original_path='/orig/movie.mkv',
+                    proposed_path=str(undo_env['proposed']))
+    monkeypatch.setattr(media_service, '_get_conn', lambda: _open(path))
+
+    ok, err = media_service.undo('item-1')
+    assert (ok, err) == (True, None)
+    assert undo_env['dest'].exists()
+    assert not undo_env['proposed'].exists()
+    row = _row(path)
+    assert row['status'] == 'pending'
+    assert row['original_path'] == str(undo_env['dest'])
+
+
+def test_undo_puts_the_file_back_when_the_database_rejects_the_write(undo_env, monkeypatch):
+    """The bug agy found: the move happened first and the UPDATE was unguarded, so an
+    IntegrityError left the file in the drop zone while the database still called it
+    approved and living in the library. Permanently out of sync, from a button press."""
+    path = _undo_db(undo_env['tmp_path'], original_path='/orig/movie.mkv',
+                    proposed_path=str(undo_env['proposed']))
+    _add_pending(path, str(undo_env['dest']))
+    monkeypatch.setattr(media_service, '_get_conn', lambda: _open(path))
+
+    ok, err = media_service.undo('item-1')
+
+    assert ok is False
+    assert 'left where it was' in err
+    # The two halves agree again: file back in the library, row still approved.
+    assert undo_env['proposed'].exists(), 'file was not moved back -- this is the data-loss bug'
+    assert not undo_env['dest'].exists()
+    row = _row(path)
+    assert row['status'] == 'approved'
+    assert row['proposed_path'] == str(undo_env['proposed'])
+
+
+def test_undo_refuses_when_the_drop_zone_already_holds_that_name(undo_env, monkeypatch):
+    path = _undo_db(undo_env['tmp_path'], original_path='/orig/movie.mkv',
+                    proposed_path=str(undo_env['proposed']))
+    monkeypatch.setattr(media_service, '_get_conn', lambda: _open(path))
+    undo_env['dest'].write_text('a different file already here')
+
+    ok, err = media_service.undo('item-1')
+    assert ok is False and 'already exists' in err
+    assert undo_env['dest'].read_text() == 'a different file already here'  # untouched
+    assert undo_env['proposed'].exists()
+
+
+def test_undo_reports_a_database_failure_even_with_no_file_to_move(undo_env, monkeypatch):
+    """proposed_path missing from disk means nothing is moved -- the row still has to
+    be reported honestly rather than raising out of the handler."""
+    path = _undo_db(undo_env['tmp_path'], original_path='/orig/movie.mkv',
+                    proposed_path=str(undo_env['tmp_path'] / 'gone.mkv'))
+    _add_pending(path, str(undo_env['drop_zone'] / 'movie.mkv'))
+    monkeypatch.setattr(media_service, '_get_conn', lambda: _open(path))
+
+    ok, err = media_service.undo('item-1')
+    assert ok is False
+    assert 'Undo failed' in err
+    assert _row(path)['status'] == 'approved'

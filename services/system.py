@@ -22,7 +22,8 @@ def get_status() -> dict:
     if _status_cache['status'] is not None and (now - _status_cache['time']) < _STATUS_CACHE_TTL:
         return _status_cache['status']
 
-    status = {'defcon': [], 'containers': [], 'disk': {}, 'memory': {}}
+    status = {'defcon': [], 'containers': [], 'disk': {}, 'memory': {},
+              'containers_error': None}
 
     try:
         # Check the mount before reading it. /mnt/Multimedia exists as a plain
@@ -60,8 +61,14 @@ def get_status() -> dict:
         except Exception:
             pass
 
-    except Exception:
+    except Exception as e:
+        # Keep the reason. An empty container list and "docker did not answer" are
+        # different answers, and a caller that only sees [] cannot tell an idle host
+        # from a broken daemon -- so it would render one as the other, forever.
         status['containers'] = []
+        status['containers_error'] = f'{type(e).__name__}: {e}'
+        status['defcon'].append('DOCKER_UNREACHABLE: could not read container state — '
+                                f'{type(e).__name__}: {e}')
 
     try:
         daemon_status = subprocess.run(
@@ -70,8 +77,13 @@ def get_status() -> dict:
         status['daemon_active'] = (daemon_status == 'active')
         if daemon_status != 'active':
             status['defcon'].append('DAEMON_CRASH: media-curator.service is not active!')
-    except Exception:
+    except Exception as e:
+        # This used to set daemon_active False and stop, which suppressed the banner:
+        # the daemon read as dead AND the alert that says so went missing. Not knowing
+        # is its own alert -- the one thing it must never do is go quiet.
         status['daemon_active'] = False
+        status['defcon'].append('DAEMON_UNKNOWN: could not ask systemd about '
+                                f'media-curator.service — {type(e).__name__}: {e}')
 
     _status_cache['time'] = now
     _status_cache['status'] = status
@@ -208,13 +220,42 @@ def get_units(manager: str = 'user') -> dict:
             'error': '; '.join(errors) if errors else None}
 
 
+# Numbers that vary between otherwise-identical errors: pids, addresses, byte counts,
+# timeouts. Exact-string grouping never folds those, so fifty OOM kills stay fifty rows.
+_NOISE_PATTERNS = [
+    (re.compile(r'\b0x[0-9a-fA-F]+\b'), '0xN'),   # addresses
+    (re.compile(r'\[\d+\]'), '[N]'),              # bracketed pids
+    # No trailing \b: a unit suffix ("after 90s", "in 180 seconds") must normalise too,
+    # while the leading \b still protects identifiers like GPC1 and nvme0n1.
+    (re.compile(r'\b\d{2,}'), 'N'),
+]
+
+
+def _normalise_message(message: str) -> str:
+    """A grouping key, never displayed. Single digits are left alone deliberately --
+    'disk 1' and 'disk 2' are different subjects, while a pid or a byte count is the
+    same error wearing a different number."""
+    for pattern, replacement in _NOISE_PATTERNS:
+        message = pattern.sub(replacement, message)
+    return message
+
+
+def _group_key(entry: dict) -> tuple:
+    """journald stamps a stable 128-bit MESSAGE_ID on catalogued messages -- when one
+    is there it is exact and free. Only about a fifth of this host's error entries
+    carry one, so the normalised text carries the rest."""
+    identity = entry.get('message_id') or _normalise_message(entry['message'])
+    return (entry['source'], entry['origin'], identity)
+
+
 def _collapse(entries: list[dict]) -> list[dict]:
-    """Fold identical repeats into one row carrying a count. The NAS reconnect logs
-    the same sentence every few minutes -- fourteen identical rows push everything
-    else off the screen and say nothing the first one didn't."""
+    """Fold repeats into one row carrying a count. The NAS reconnect logs the same
+    sentence every few minutes -- fourteen near-identical rows push everything else off
+    the screen and say nothing the first one didn't. The row shows the newest actual
+    message; only the grouping is normalised."""
     grouped: dict[tuple, dict] = {}
     for e in entries:
-        key = (e['source'], e['origin'], e['message'])
+        key = _group_key(e)
         existing = grouped.get(key)
         if existing is None:
             grouped[key] = dict(e, count=1, first_at=e['at'])
@@ -223,6 +264,7 @@ def _collapse(entries: list[dict]) -> list[dict]:
         existing['first_at'] = min(existing['first_at'], e['at'])
         if e['at'] > existing['at']:
             existing['at'] = e['at']
+            existing['message'] = e['message']   # show the newest real text, not the key
     return sorted(grouped.values(), key=lambda e: e['at'], reverse=True)
 
 
@@ -268,6 +310,7 @@ def get_errors(hours: int = 24, limit: int = 400) -> dict:
             entries.append({
                 'source': f'journal-{manager}', 'origin': origin, 'message': message,
                 'at': at, 'severity': _PRIORITY_NAMES.get(str(d.get('PRIORITY')), 'error'),
+                'message_id': d.get('MESSAGE_ID'),
                 'detail': {'manager': manager, 'pid': d.get('_PID'),
                            'identifier': d.get('SYSLOG_IDENTIFIER'),
                            'unit': d.get('_SYSTEMD_UNIT')},

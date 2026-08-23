@@ -1065,3 +1065,57 @@ async def test_an_unreachable_plane_leaves_the_checkmark_alone(
     await user.should_see(marker=f'sent-icon-{aid}')
     with pytest.raises(AssertionError):
         user.find(marker=f'send-icon-{aid}')
+
+
+def test_send_always_carries_an_idempotency_key_even_without_an_article_id(monkeypatch):
+    """external_id is the only thing between a lost response and a duplicate to-do, so
+    it is never optional. An article with no id used to POST without one, silently
+    dropping back to the un-idempotent behaviour the key exists to prevent."""
+    captured = {}
+
+    def _post(url, **kw):
+        captured.update(kw.get('json') or {})
+        return _FakeResponse(201, {'id': 'new-issue'})
+
+    _stub_plane(monkeypatch, post=_post, get=lambda *a, **kw: _FakeResponse(200, {'id': 'new-issue'}))
+    result = plane_service.send_article_to_plane(
+        {'title': 'No Id Here', 'source': 'https://x/'}, 'summary')
+
+    assert result['created'] is True
+    assert captured.get('external_id', '').startswith('sha1:')
+    assert captured.get('external_source') == plane_service.EXTERNAL_SOURCE
+
+
+def test_the_derived_idempotency_key_is_stable_across_retries(monkeypatch):
+    """Derived from the content, so the second attempt collides with the first at the
+    server instead of filing a second to-do."""
+    keys = []
+
+    def _post(url, **kw):
+        keys.append((kw.get('json') or {}).get('external_id'))
+        return _FakeResponse(201, {'id': 'new-issue'})
+
+    _stub_plane(monkeypatch, post=_post, get=lambda *a, **kw: _FakeResponse(200, {'id': 'new-issue'}))
+    article = {'title': 'Same Article', 'source': 'https://x/'}
+    plane_service.send_article_to_plane(article, 'summary')
+    plane_service.send_article_to_plane(article, 'summary')
+
+    assert keys[0] == keys[1]
+    # ...and a different article does not collide with it
+    plane_service.send_article_to_plane({'title': 'Other', 'source': 'https://x/'}, 'summary')
+    assert keys[2] != keys[0]
+
+
+def test_a_409_without_an_issue_id_is_reported_rather_than_silently_linked(monkeypatch):
+    """Plane saying 'that external_id is taken' without naming the issue leaves nothing
+    to record. Claiming success would tick nothing and retry into the same 409 forever."""
+    _stub_plane(monkeypatch,
+                post=lambda *a, **kw: _FakeResponse(409, {'error': 'Conflict'}),
+                get=lambda *a, **kw: _FakeResponse(200, {}))
+    result = plane_service.send_article_to_plane(
+        {'id': 'a.md', 'title': 'T', 'source': 'https://x/'}, 'summary')
+
+    assert result['already_existed'] is True
+    assert result['issue_id'] is None
+    assert result['verified'] is False
+    assert result['error'] and 'could not be linked' in result['error']

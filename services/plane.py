@@ -2,6 +2,7 @@
 pattern already proven by ~/projects/github-plane-sync/sync.py (same workspace/project,
 same X-Api-Key auth, same description_html field), rather than inventing a new one.
 """
+import hashlib
 import html
 import os
 
@@ -81,16 +82,35 @@ def send_article_to_plane(article: dict, summary: str) -> dict:
             description_html += f'<p><a href="{html.escape(source)}">{html.escape(source)}</a></p>'
 
         payload = {'name': article['title'], 'description_html': description_html}
-        if article.get('id'):
-            payload['external_id'] = str(article['id'])
-            payload['external_source'] = EXTERNAL_SOURCE
+        # The external_id is the ONLY thing standing between a lost response and a
+        # duplicate to-do, so it is never optional. An article with no id used to send
+        # without one, quietly dropping back to the un-idempotent behaviour this exists
+        # to prevent -- derive a stable key from the content instead.
+        external_id = str(article.get('id') or '').strip()
+        if not external_id:
+            digest = hashlib.sha1(
+                f"{article['title']}|{article.get('source') or ''}".encode()).hexdigest()
+            external_id = f'sha1:{digest}'
+        payload['external_id'] = external_id
+        payload['external_source'] = EXTERNAL_SOURCE
         if label_id:
             payload['labels'] = [label_id]
 
         resp = requests.post(f"{_base_url()}/issues/", headers=_headers(), json=payload, timeout=30)
         if resp.status_code == 409:
             # Already filed under this external_id; the 409 body carries the existing id.
-            existing = resp.json().get('id')
+            try:
+                existing = resp.json().get('id')
+            except ValueError:
+                existing = None
+            if not existing:
+                # Plane says the id is taken but not by which issue. Recording nothing
+                # would leave the article un-ticked and retrying into the same 409
+                # forever, so report it as a real outcome rather than a silent link.
+                return {'created': True, 'already_existed': True, 'issue_id': None,
+                        'verified': False,
+                        'error': 'Plane reports this article is already filed but did not '
+                                 'return the issue id, so it could not be linked.'}
             return {'created': True, 'already_existed': True, 'issue_id': existing,
                     'error': None, 'verified': _issue_exists(existing)}
         resp.raise_for_status()

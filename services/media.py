@@ -141,35 +141,64 @@ def bulk_action(action: str, item_ids: list[str]) -> list[dict]:
 
 
 def undo(item_id: str) -> tuple[bool, str | None]:
+    """Moves an approved item back to the drop zone and re-queues it.
+
+    This spans two storage systems -- the filesystem and queue.db -- so the order of
+    operations is the whole problem. The move used to happen first and the UPDATE was
+    unguarded: media-curator dropped its UNIQUE index on original_path for a PARTIAL
+    unique index over (original_path, file_hash) scoped to pending rows, and writing
+    original_path while flipping status back to 'pending' is exactly what that index
+    now judges. An IntegrityError there left the file already moved while the database
+    still called it approved and living at proposed_path -- permanently out of sync,
+    and reachable from a button.
+
+    So: if the database write fails, the file goes back where it came from before the
+    error is reported. The pair either both change or neither does.
+    """
     import shutil
     conn = _get_conn()
-    c = conn.cursor()
-    c.execute('SELECT * FROM media_queue WHERE id=?', (item_id,))
-    row = c.fetchone()
-    if not row or row['status'] != 'approved':
-        conn.close()
-        return False, 'Item not found or not approved'
+    try:
+        c = conn.cursor()
+        c.execute('SELECT * FROM media_queue WHERE id=?', (item_id,))
+        row = c.fetchone()
+        if not row or row['status'] != 'approved':
+            return False, 'Item not found or not approved'
 
-    proposed_path = row['proposed_path']
-    original_filename = row['original_filename']
-    from curator_daemon import DROP_ZONE
-    dest_path = os.path.join(DROP_ZONE, original_filename)
+        proposed_path = row['proposed_path']
+        original_filename = row['original_filename']
+        from curator_daemon import DROP_ZONE
+        dest_path = os.path.join(DROP_ZONE, original_filename)
 
-    if os.path.exists(proposed_path):
-        if os.path.exists(dest_path):
-            conn.close()
-            return False, f'Destination {original_filename} already exists in drop zone.'
+        moved = False
+        if os.path.exists(proposed_path):
+            if os.path.exists(dest_path):
+                return False, f'Destination {original_filename} already exists in drop zone.'
+            try:
+                shutil.move(proposed_path, dest_path)
+            except Exception as e:
+                return False, f'Move failed: {e}'
+            moved = True
+
         try:
-            shutil.move(proposed_path, dest_path)
+            c.execute('UPDATE media_queue SET status="pending", needs_intervention=1, '
+                       'original_path=? WHERE id=?', (dest_path, item_id))
+            conn.commit()
         except Exception as e:
-            conn.close()
-            return False, f'Move failed: {e}'
-
-    c.execute('UPDATE media_queue SET status="pending", needs_intervention=1, original_path=? WHERE id=?',
-              (dest_path, item_id))
-    conn.commit()
-    conn.close()
-    return True, None
+            conn.rollback()
+            if not moved:
+                return False, f'Undo failed: {e}'
+            try:
+                shutil.move(dest_path, proposed_path)
+            except Exception as put_back:
+                # Both halves failed. Say so loudly and name both paths -- a silent
+                # "failed" here would leave a file stranded with nothing pointing at it.
+                return False, (f'Undo failed ({e}), AND the file could not be moved back '
+                               f'({put_back}). It is at {dest_path} but the database still '
+                               f'says {proposed_path} -- needs manual repair.')
+            return False, f'Undo failed, file left where it was: {e}'
+        return True, None
+    finally:
+        conn.close()
 
 
 def upload(filename: str, content: bytes) -> tuple[bool, str]:

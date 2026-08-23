@@ -372,9 +372,16 @@ def build():
                 'height:90px;border-radius:9px;background:rgba(255,255,255,0.04);width:100%')
             return
         containers = status.get('containers') or []
+        if status.get('containers_error'):
+            _unknown_box(f"Could not read container state — {status['containers_error']}")
+            return
         if not containers:
-            _unknown_box('Docker returned no containers. That is either an empty host or an '
-                         'unreachable daemon — this page cannot tell which, so it claims neither.')
+            with ui.row().classes('items-center no-wrap').style(
+                    f'gap:10px;padding:13px 15px;border-radius:9px;width:100%;'
+                    f'background:{theme.CARD_BG};border:1px solid {theme.BORDER}'):
+                ui.icon('fa-solid fa-circle-check').style(f'color:{theme.GREEN};font-size:13px')
+                ui.label('Docker is reachable and reports no containers.').style(
+                    f'font-size:11.5px;color:{theme.TEXT_MUTED}')
             return
         with ui.grid(columns='repeat(auto-fill, minmax(200px, 1fr))').style('gap:14px;width:100%'):
             for c in containers:
