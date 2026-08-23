@@ -225,6 +225,14 @@ def build():
             render_articles.refresh()
         else:
             _get_row_refreshable(aid).refresh()
+        # The reader's own action row draws the same read/favorite/archived state, so a
+        # toggle on the article that happens to be open has to repaint it too. Without
+        # this the list row's star fills immediately and the reader's stays hollow until
+        # something else rebuilds the reader -- switching articles, opening Discuss.
+        # Fixed here rather than in each toggle so a fourth one cannot forget. (Reported
+        # by Chris 2026-08-04; also bit Discuss mode, which shows the same row.)
+        if state.get('selected') == aid:
+            render_reader.refresh()
 
     # ---------- folder scoping (archiving semantics live here) ----------
 
@@ -1534,7 +1542,7 @@ def build():
         active = [q for q in state['queue'] if q.get('status') in ('pending', 'processing')]
         if failed:
             with ui.row().classes('items-center no-wrap').style('width:100%;padding:2px 4px 6px'):
-                ui.label('FAILED · CLICK TO RETRY').style(
+                ui.label('FAILED · CLICK FOR DETAILS').style(
                     f'font-size:10.5px;font-weight:700;color:{theme.RED};flex:1')
                 ui.label('Retry all').classes('cursor-pointer').style(
                     f'font-size:10px;font-weight:600;color:{theme.RED}').on('click', lambda: retry_all_failed())
@@ -1542,7 +1550,7 @@ def build():
                 with ui.column().classes('cursor-pointer').style(
                         'padding:10px;border-radius:9px;margin-bottom:6px;background:rgba(243,139,168,0.07);'
                         'border:1px solid rgba(243,139,168,0.25);gap:4px;width:100%'
-                ).on('click', lambda _, i=item: retry_item(i['id'])):
+                ).on('click', lambda _, i=item: show_queue_error(i)).mark(f"queue-failed-{item['id']}"):
                     ui.label(_short_url(item['url'])).style(
                         f'font-size:11.5px;font-weight:600;color:{theme.RED}')
                     ui.label(item.get('last_error', 'Failed after retries')).style(
@@ -1561,6 +1569,59 @@ def build():
                         f'flex:1;font-size:11.5px;font-weight:600;color:{theme.AMBER};overflow:hidden;'
                         f'text-overflow:ellipsis;white-space:nowrap')
                     ui.label(status_label).style(f'font-size:9.5px;font-weight:700;color:{theme.AMBER}')
+
+    def show_queue_error(item: dict):
+        """The error used to exist only as a hover tooltip, and clicking the entry
+        retried it -- so the one thing you could not do with a failure was read it.
+        (Chris, 2026-08-04.) Retry still lives here, one click further in."""
+        error_text = item.get('last_error') or 'Failed after retries (no error recorded).'
+        with ui.dialog() as dialog, ui.card().style(
+                f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);'
+                f'border-radius:12px;padding:20px;min-width:620px;max-width:820px'):
+            with ui.row().classes('items-center no-wrap w-full').style('gap:10px'):
+                ui.icon('fa-solid fa-circle-exclamation').style(f'color:{theme.RED};font-size:14px')
+                ui.label('Queue item failed').style(
+                    f'font-size:14px;font-weight:700;color:{theme.TEXT}')
+                ui.space()
+                ui.button(icon='close', on_click=dialog.close).props('flat dense round').style(
+                    f'color:{theme.TEXT_MUTED}')
+
+            with ui.row().classes('items-center').style('gap:18px;margin:2px 0 10px;flex-wrap:wrap'):
+                for label, value in [('ATTEMPTS', f"{item.get('retry_count', 0)}/3"),
+                                      ('ADDED', str(item.get('added_at') or '—'))]:
+                    with ui.column().style('gap:2px'):
+                        ui.label(label).style(
+                            f'font-size:9px;font-weight:700;letter-spacing:0.08em;color:{theme.TEXT_DIM}')
+                        ui.label(value).style(f'font-size:11.5px;color:{theme.TEXT_MUTED}')
+
+            ui.label('URL').style(
+                f'font-size:9px;font-weight:700;letter-spacing:0.08em;color:{theme.TEXT_DIM}')
+            ui.label(item.get('url', '')).style(
+                f"width:100%;font-family:'JetBrains Mono',monospace;font-size:11px;"
+                f"color:{theme.TEXT_MUTED};user-select:text;word-break:break-all;margin-bottom:8px")
+
+            ui.label('ERROR').style(
+                f'font-size:9px;font-weight:700;letter-spacing:0.08em;color:{theme.TEXT_DIM}')
+            ui.label(error_text).style(
+                f"width:100%;background:rgba(0,0,0,0.28);border-radius:8px;padding:12px 14px;"
+                f"font-family:'JetBrains Mono',monospace;font-size:11.5px;color:{theme.TEXT};"
+                f"line-height:1.6;white-space:pre-wrap;word-break:break-word;user-select:text;"
+                f"max-height:260px;overflow:auto")
+
+            async def _retry_and_close():
+                dialog.close()
+                await retry_item(item['id'])
+
+            with ui.row().classes('justify-end w-full').style('gap:10px;margin-top:14px'):
+                def _copy_error():
+                    ui.clipboard.write(error_text)
+                    ui.notify('Copied', type='positive')
+                ui.button('Copy error', on_click=_copy_error).props('flat dense').mark(
+                    'queue-copy-error').style(f'color:{theme.ACCENT};font-size:11.5px')
+                ui.button('Retry', on_click=_retry_and_close).props('dense').mark(
+                    'queue-retry').style(
+                    f'background:{theme.ACCENT};color:{theme.BG};font-weight:700;font-size:11.5px')
+        dialog.open()
 
     async def retry_item(item_id):
         await run.io_bound(intake.retry_queue_item, item_id)

@@ -136,23 +136,44 @@ async def test_edit_title_updates_single_row(user: User, fake_media_service):
     assert fake_media_service[0]['proposed_title'] == 'Renamed Item'
 
 
+def _row_element_id(user, index):
+    return next(iter(user.find(marker=f'row-select-{index}').elements)).id
+
+
 @pytest.mark.nicegui_main_file('test_media_fixes.py')
-async def test_toggle_select_timing_with_large_queue(user: User, monkeypatch):
-    """Sanity check against a ~80-item queue (matching the real media-curator queue
-    size that motivated this fix) -- toggling selection must stay well under the ~1s
-    full-rebuild cost the equivalent intake.py bug caused."""
+async def test_toggle_select_rebuilds_one_row_not_the_whole_queue(user: User, monkeypatch):
+    """Against a ~80-item queue (the real media-curator size that motivated the fix),
+    toggling selection must refresh only the row that changed.
+
+    This asserts work done rather than seconds elapsed. It used to assert a 0.5s
+    wall-clock budget and failed 2 runs in 3 on a loaded machine -- this host also runs
+    a game server and a media daemon, so a timing threshold here measures the host's
+    mood, not the code. Element identity is the honest signal: NiceGUI's .refresh()
+    tears its subtree down and rebuilds it, so a full-list rebuild gives every row new
+    elements while a single-row refresh touches exactly one.
+    """
     queue = [_item(str(i)) for i in range(80)]
     monkeypatch.setattr(media_service, 'get_queue', lambda *a, **kw: list(queue))
 
     await user.open('/media-test')
     await user.should_see('Title 0')
+    # Let the initial async load finish replacing the skeleton. Measured: ids churn once
+    # right after open, then hold. The page also reloads every 5s, which is two orders of
+    # magnitude outside the window below -- unlike the 0.5s budget this test used to
+    # assert, that margin does not shrink when the host is busy.
+    await asyncio.sleep(1.0)
 
-    t0 = time.time()
+    untouched = [0, 39, 41, 79]
+    before = {i: _row_element_id(user, i) for i in untouched}
+    before_target = _row_element_id(user, 40)
+
     user.find(marker='row-select-40').click()
-    await asyncio.sleep(0.05)
-    t1 = time.time()
-    print(f'\n\nMEDIA TOGGLE_SELECT (80 items) TOOK {t1 - t0:.3f}s\n\n')
-    assert t1 - t0 < 0.5
+    await asyncio.sleep(0.1)
+
+    assert _row_element_id(user, 40) != before_target, 'the toggled row should have been rebuilt'
+    for i in untouched:
+        assert _row_element_id(user, i) == before[i], (
+            f'row {i} was rebuilt too -- this is the full-list rebuild the fix removed')
 
 
 # ---------- undo(): the filesystem and the database must move together ----------
@@ -284,3 +305,53 @@ def test_undo_reports_a_database_failure_even_with_no_file_to_move(undo_env, mon
     assert ok is False
     assert 'Undo failed' in err
     assert _row(path)['status'] == 'approved'
+
+
+# ---------- the page layer surfaces service failures instead of swallowing them ----------
+#
+# services/media.py talks to another repo's database over an unpinned import, so its
+# calls genuinely fail -- undo() can now come back with an IntegrityError message it
+# could not previously produce. A failure that reaches the user as nothing at all is
+# the same class of bug as the Send-to-HomeLab spinner that turned forever.
+
+@pytest.mark.nicegui_main_file('test_media_fixes.py')
+async def test_a_failed_approve_tells_the_user_why(user: User, fake_media_service, monkeypatch):
+    monkeypatch.setattr(media_service, 'approve',
+                        lambda item_id: (False, 'library path is not writable'))
+    await user.open('/media-test')
+    await user.should_see('Title 0')
+
+    user.find(marker='approve-0').click()
+    await asyncio.sleep(0.3)
+
+    await user.should_see('library path is not writable')
+
+
+@pytest.mark.nicegui_main_file('test_media_fixes.py')
+async def test_a_failed_reject_tells_the_user_why(user: User, fake_media_service, monkeypatch):
+    monkeypatch.setattr(media_service, 'reject',
+                        lambda item_id: (False, 'file is gone from the drop zone'))
+    await user.open('/media-test')
+    await user.should_see('Title 0')
+
+    user.find(marker='reject-0').click()
+    await asyncio.sleep(0.2)
+    user.find(marker='confirm-dialog-confirm').click()   # reject is confirm-gated
+    await asyncio.sleep(0.3)
+
+    await user.should_see('file is gone from the drop zone')
+
+
+@pytest.mark.nicegui_main_file('test_media_fixes.py')
+async def test_a_failed_approve_leaves_the_row_where_it_was(user: User, fake_media_service, monkeypatch):
+    """A refused approve must not optimistically mark the row approved -- the file did
+    not move, and a row claiming otherwise sends you looking in the wrong place."""
+    monkeypatch.setattr(media_service, 'approve', lambda item_id: (False, 'nope'))
+    await user.open('/media-test')
+    await user.should_see('Title 0')
+
+    user.find(marker='approve-0').click()
+    await asyncio.sleep(0.3)
+
+    assert fake_media_service[0]['status'] == 'pending'
+    await user.should_see(marker='approve-0')   # still offering the action

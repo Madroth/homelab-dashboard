@@ -1119,3 +1119,85 @@ def test_a_409_without_an_issue_id_is_reported_rather_than_silently_linked(monke
     assert result['issue_id'] is None
     assert result['verified'] is False
     assert result['error'] and 'could not be linked' in result['error']
+
+
+def _star_icon_of(user, marker):
+    """The reader's Favorite control is an icon, not text, so the assertion has to read
+    the rendered icon name. fa-solid = filled = favorited; fa-regular = hollow."""
+    element = next(iter(user.find(marker=marker).elements))
+    for child in element.descendants():
+        name = getattr(child, '_props', {}).get('name', '')
+        if 'star' in name:
+            return name
+    return ''
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_reader_star_repaints_when_the_open_article_is_toggled(user: User, isolated_intake):
+    """Chris, 2026-08-04: toggling Favorite from the list row filled the row's star
+    immediately while the reader's own star stayed hollow until something else rebuilt
+    the reader. State on disk was always right -- purely a repaint gap."""
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    aid = '2026-07-30-235959-new-article.md'
+
+    user.find(marker=f'article-row-{aid}').click()
+    await asyncio.sleep(0.3)
+    await user.should_see(marker='reader-mode-read')
+    assert 'regular' in _star_icon_of(user, f'row-reader-f-{aid}'), 'should start unfavorited'
+
+    user.find(marker=f'row-f-{aid}').click()      # toggle from the LIST row
+    await asyncio.sleep(0.3)
+
+    assert 'solid' in _star_icon_of(user, f'row-reader-f-{aid}'), \
+        'the reader star did not repaint after the list row toggled it'
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_reader_star_repaints_when_toggled_from_the_reader_itself(user: User, isolated_intake):
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    aid = '2026-07-30-235959-new-article.md'
+    user.find(marker=f'article-row-{aid}').click()
+    await asyncio.sleep(0.3)
+    await user.should_see(marker='reader-mode-read')
+
+    user.find(marker=f'row-reader-f-{aid}').click()   # toggle from the READER
+    await asyncio.sleep(0.3)
+    assert 'solid' in _star_icon_of(user, f'row-reader-f-{aid}')
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_a_failed_queue_item_shows_its_full_error(user: User, isolated_intake, monkeypatch):
+    """The error used to live only in a hover tooltip and clicking the entry retried it,
+    so the one thing you could not do with a failure was read it (Chris, 2026-08-04)."""
+    long_error = ('HTTPConnectionPool(host=\'100.74.2.92\', port=11434): Max retries exceeded '
+                  'with url: /api/chat (Caused by NewConnectionError: Connection refused)')
+    monkeypatch.setattr(intake_service, 'get_queue', lambda *a, **kw: [
+        {'id': 'q1', 'url': 'https://example.com/an-article', 'status': 'failed',
+         'retry_count': 3, 'last_error': long_error, 'added_at': '2026-08-22 10:00'},
+    ])
+
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    await user.should_see(marker='queue-failed-q1')
+
+    user.find(marker='queue-failed-q1').click()
+    await asyncio.sleep(0.3)
+
+    await user.should_see('Queue item failed')
+    await user.should_see('Connection refused')      # the full text, not a truncated row
+    await user.should_see(marker='queue-copy-error')
+    await user.should_see(marker='queue-retry')      # retry is still reachable, one click further
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_a_failed_item_with_no_recorded_error_still_opens(user: User, isolated_intake, monkeypatch):
+    monkeypatch.setattr(intake_service, 'get_queue', lambda *a, **kw: [
+        {'id': 'q2', 'url': 'https://example.com/x', 'status': 'failed', 'retry_count': 3},
+    ])
+    await user.open('/intake-test')
+    await user.should_see(marker='queue-failed-q2')
+    user.find(marker='queue-failed-q2').click()
+    await asyncio.sleep(0.3)
+    await user.should_see('no error recorded')
