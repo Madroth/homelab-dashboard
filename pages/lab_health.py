@@ -67,7 +67,7 @@ def _clock(ts: float) -> str:
 
 def build():
     state = {'status': None, 'logs': [], 'errors': None, 'units': None,
-             'status_error': None}
+             'status_error': None, 'resources': None}
 
     # ---------- shared chrome ----------
 
@@ -364,6 +364,110 @@ def build():
 
     # ---------- containers, metrics, logs (carried over from System Status) ----------
 
+    def _project_of(container: dict) -> str:
+        for pair in (container.get('Labels') or '').split(','):
+            if pair.startswith('com.docker.compose.project='):
+                return pair.split('=', 1)[1] or 'ungrouped'
+        return 'ungrouped'
+
+    def show_container_detail(name: str):
+        detail = system.get_container_detail(name)
+        with ui.dialog() as dialog, ui.card().style(
+                f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);'
+                f'border-radius:12px;padding:20px;min-width:700px;max-width:900px'):
+            with ui.row().classes('items-center no-wrap w-full').style('gap:10px'):
+                ui.label(name).style(
+                    f"font-size:14px;font-weight:700;font-family:'JetBrains Mono',monospace;color:{theme.TEXT}")
+                ui.space()
+                ui.button(icon='close', on_click=dialog.close).props('flat dense round').style(
+                    f'color:{theme.TEXT_MUTED}')
+
+            if not detail['ok']:
+                _unknown_box(f"Could not inspect this container — {detail['error']}")
+                dialog.open()
+                return
+
+            running = detail['state'] == 'running'
+            state_color = theme.GREEN if running else theme.RED
+            # A declared healthcheck disagreeing with 'running' is the interesting case;
+            # no healthcheck at all is not the same as healthy, so it says so.
+            health = detail['health']
+            health_text = health or 'no healthcheck declared'
+            health_color = (theme.GREEN if health == 'healthy' else
+                            theme.RED if health == 'unhealthy' else
+                            theme.AMBER if health else theme.TEXT_DIM)
+            with ui.row().classes('items-center').style('gap:20px;flex-wrap:wrap;margin:6px 0 12px'):
+                for label, value, tone in [
+                        ('STATE', detail['state'], state_color),
+                        ('HEALTH', health_text, health_color),
+                        ('RESTARTS', str(detail['restarts']),
+                         theme.AMBER if detail['restarts'] > 3 else theme.TEXT_MUTED),
+                        ('EXIT', str(detail['exit_code']), theme.TEXT_MUTED),
+                        ('OOM KILLED', 'yes' if detail['oom_killed'] else 'no',
+                         theme.RED if detail['oom_killed'] else theme.TEXT_MUTED),
+                ]:
+                    with ui.column().style('gap:2px'):
+                        ui.label(label).style(
+                            f'font-size:9px;font-weight:700;letter-spacing:0.08em;color:{theme.TEXT_DIM}')
+                        ui.label(value).style(f'font-size:12px;font-weight:600;color:{tone}')
+
+            if detail['stats']:
+                s = detail['stats']
+                ui.label('USING NOW').style(
+                    f'font-size:9px;font-weight:700;letter-spacing:0.08em;color:{theme.TEXT_DIM}')
+                with ui.row().classes('items-center').style('gap:20px;flex-wrap:wrap;margin-bottom:10px'):
+                    for label, value in [('CPU', s['cpu']), ('MEMORY', f"{s['mem']} ({s['mem_pct']})"),
+                                          ('NET I/O', s['net']), ('BLOCK I/O', s['block']),
+                                          ('PIDS', s['pids'])]:
+                        with ui.column().style('gap:2px'):
+                            ui.label(label).style(
+                                f'font-size:9px;font-weight:700;letter-spacing:0.08em;color:{theme.TEXT_DIM}')
+                            ui.label(str(value)).style(f'font-size:12px;color:{theme.TEXT}')
+            elif detail['stats_error']:
+                _unknown_box(f"Could not read live stats — {detail['stats_error']}")
+
+            with ui.row().classes('items-center').style('gap:18px;flex-wrap:wrap;margin-bottom:8px'):
+                for label, value in [('IMAGE', detail['image']),
+                                      ('PROJECT', detail['project'] or '—'),
+                                      ('SERVICE', detail['service'] or '—')]:
+                    ui.label(f'{label}: {value}').style(
+                        f"font-size:10.5px;color:{theme.TEXT_DIM};font-family:'JetBrains Mono',monospace")
+            if detail['ports']:
+                ui.label('PORTS: ' + ', '.join(detail['ports'])).style(
+                    f"font-size:10.5px;color:{theme.TEXT_DIM};font-family:'JetBrains Mono',monospace")
+            if detail['mounts']:
+                ui.label(f"MOUNTS: {len(detail['mounts'])} — " + '; '.join(detail['mounts'][:2])).style(
+                    f"font-size:10.5px;color:{theme.TEXT_DIM};font-family:'JetBrains Mono',monospace;"
+                    f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%")
+
+            ui.label('RECENT OUTPUT').style(
+                f'font-size:9px;font-weight:700;letter-spacing:0.08em;color:{theme.TEXT_DIM};margin-top:8px')
+            if detail['log_error']:
+                _unknown_box(f"Could not read logs — {detail['log_error']}")
+            elif detail['logs']:
+                ui.label('\n'.join(detail['logs'])).style(
+                    f"width:100%;background:rgba(0,0,0,0.28);border-radius:8px;padding:12px 14px;"
+                    f"font-family:'JetBrains Mono',monospace;font-size:10.5px;color:{theme.TEXT_MUTED};"
+                    f"line-height:1.55;white-space:pre-wrap;word-break:break-word;user-select:text;"
+                    f"max-height:260px;overflow:auto")
+            else:
+                ui.label('No output.').style(f'font-size:11.5px;color:{theme.TEXT_DIM}')
+
+            cmd = f'docker logs --tail 200 {name}'
+            with ui.row().classes('items-center no-wrap w-full').style(
+                    f'gap:10px;background:rgba(0,0,0,0.28);border-radius:8px;padding:10px 12px;margin-top:10px'):
+                ui.label(cmd).style(
+                    f"flex:1;min-width:0;font-family:'JetBrains Mono',monospace;font-size:11px;"
+                    f"color:{theme.TEXT_MUTED};user-select:text")
+                _copy(cmd, 'Copy')
+                with ui.row().classes('items-center no-wrap cursor-pointer').style(
+                        f'gap:6px;padding:5px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.08);'
+                        f'color:{theme.TEXT_MUTED};font-size:10.5px'
+                ).on('click', lambda: ui.navigate.to(
+                        f'http://100.87.245.107:8888/container/{name}', new_tab=True)):
+                    ui.label('Open in Dozzle')
+        dialog.open()
+
     @ui.refreshable
     def render_containers():
         status = state['status']
@@ -383,66 +487,246 @@ def build():
                 ui.label('Docker is reachable and reports no containers.').style(
                     f'font-size:11.5px;color:{theme.TEXT_MUTED}')
             return
-        with ui.grid(columns='repeat(auto-fill, minmax(200px, 1fr))').style('gap:14px;width:100%'):
-            for c in containers:
-                color = _container_color(c.get('Status', ''))
-                with ui.column().style(
-                        f'background:{theme.CARD_BG};border:1px solid {theme.BORDER};border-radius:9px;'
-                        f'padding:12px;gap:6px'):
-                    with ui.row().classes('items-center no-wrap').style('gap:8px'):
-                        ui.icon('fa-solid fa-box').style(f'color:{color}')
-                        ui.label(c.get('Names', '')).style(
-                            f'font-weight:600;font-size:12.5px;color:{theme.TEXT}')
-                    ui.label(c.get('Status', '')).style(
-                        f'font-size:10.5px;color:{theme.TEXT_MUTED};overflow:hidden;text-overflow:ellipsis;'
-                        f'white-space:nowrap;max-width:100%')
+        # Grouped by compose project: the media stack is 11 of 54 containers across 13
+        # projects, so one flat grid buries everything else under it.
+        groups: dict[str, list] = {}
+        for c in containers:
+            groups.setdefault(_project_of(c), []).append(c)
+
+        def _group_rank(item):
+            name, members = item
+            unhealthy = sum(1 for m in members
+                            if _container_color(m.get('Status', '')) != theme.GREEN)
+            return (-unhealthy, name)
+
+        with ui.column().style('gap:14px;width:100%'):
+            for project, members in sorted(groups.items(), key=_group_rank):
+                down = [m for m in members if _container_color(m.get('Status', '')) != theme.GREEN]
+                with ui.column().style('gap:7px;width:100%'):
+                    with ui.row().classes('items-center no-wrap').style('gap:9px'):
+                        ui.label(project).style(
+                            f"font-size:11.5px;font-weight:700;color:{theme.TEXT};"
+                            f"font-family:'JetBrains Mono',monospace")
+                        ui.label(f'{len(members) - len(down)}/{len(members)} up').style(
+                            f'font-size:10.5px;color:{theme.RED if down else theme.TEXT_DIM}')
+                    with ui.grid(columns='repeat(auto-fill, minmax(210px, 1fr))').style(
+                            'gap:10px;width:100%'):
+                        for c in members:
+                            color = _container_color(c.get('Status', ''))
+                            name = c.get('Names', '')
+                            with ui.column().classes('cursor-pointer').style(
+                                    f'background:{theme.CARD_BG};border:1px solid {theme.BORDER};'
+                                    f'border-radius:9px;padding:11px;gap:5px'
+                            ).on('click', lambda _, n=name: show_container_detail(n)).mark(
+                                    f'container-{_slug(name)}'):
+                                with ui.row().classes('items-center no-wrap').style('gap:8px'):
+                                    ui.icon('fa-solid fa-box').style(f'color:{color};font-size:11px')
+                                    ui.label(name).style(
+                                        f'font-weight:600;font-size:12px;color:{theme.TEXT};'
+                                        f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap')
+                                ui.label(c.get('Status', '')).style(
+                                    f'font-size:10.5px;color:{theme.TEXT_MUTED};overflow:hidden;'
+                                    f'text-overflow:ellipsis;white-space:nowrap;max-width:100%')
+
+    def _human(n):
+        if n is None:
+            return '—'
+        for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+            if abs(n) < 1024 or unit == 'TB':
+                return f'{n:.1f} {unit}' if unit != 'B' else f'{int(n)} B'
+            n /= 1024
+        return f'{n:.1f} TB'
+
+    def show_resource_detail(kind: str):
+        res = state['resources'] or {}
+        with ui.dialog() as dialog, ui.card().style(
+                f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);'
+                f'border-radius:12px;padding:20px;min-width:640px;max-width:820px'):
+            titles = {'cpu': 'CPU', 'memory': 'Memory', 'disks': 'Disks', 'temps': 'Temperature'}
+            with ui.row().classes('items-center no-wrap w-full').style('gap:10px'):
+                ui.label(titles.get(kind, kind)).style(
+                    f'font-size:14px;font-weight:700;color:{theme.TEXT}')
+                ui.space()
+                ui.button(icon='close', on_click=dialog.close).props('flat dense round').style(
+                    f'color:{theme.TEXT_MUTED}')
+
+            if kind in ('cpu', 'memory'):
+                block = res.get(kind) or {}
+                if not block.get('ok'):
+                    _unknown_box(f"Could not read {kind} — {block.get('error')}")
+                else:
+                    psi = block.get('psi') or {}
+                    if psi.get('ok'):
+                        # Pressure is the honest "is this actually hurting" number, and
+                        # the kernel keeps the averages so nothing has to be stored.
+                        ui.label('PRESSURE — share of time work stalled waiting for this').style(
+                            f'font-size:9px;font-weight:700;letter-spacing:0.08em;color:{theme.TEXT_DIM}')
+                        with ui.row().classes('items-center').style('gap:22px;margin-bottom:10px'):
+                            for window in ('avg10', 'avg60', 'avg300'):
+                                value = psi.get(f'some_{window}')
+                                with ui.column().style('gap:2px'):
+                                    ui.label(window).style(f'font-size:10px;color:{theme.TEXT_DIM}')
+                                    ui.label('—' if value is None else f'{value:.2f}%').style(
+                                        f'font-size:13px;font-weight:700;color:'
+                                        + (theme.RED if (value or 0) > 20 else
+                                           theme.AMBER if (value or 0) > 5 else theme.TEXT))
+                    else:
+                        _unknown_box(f"Pressure unavailable — {psi.get('error')}")
+
+                    if kind == 'memory':
+                        with ui.row().classes('items-center').style('gap:22px;margin-bottom:10px'):
+                            for label, value in [
+                                    ('TOTAL', _human(block.get('total'))),
+                                    ('AVAILABLE', _human(block.get('available'))),
+                                    ('SWAP USED', f"{block.get('swap_used_pct')}%"
+                                     if block.get('swap_used_pct') is not None else '—'),
+                                    ('SWAP FREE', _human(block.get('swap_free')))]:
+                                with ui.column().style('gap:2px'):
+                                    ui.label(label).style(
+                                        f'font-size:9px;font-weight:700;letter-spacing:0.08em;'
+                                        f'color:{theme.TEXT_DIM}')
+                                    ui.label(value).style(f'font-size:12px;color:{theme.TEXT}')
+
+                top = system.get_top_processes()
+                ui.label('TOP PROCESSES BY CPU').style(
+                    f'font-size:9px;font-weight:700;letter-spacing:0.08em;color:{theme.TEXT_DIM}')
+                if not top['ok']:
+                    _unknown_box(f"Could not list processes — {top['error']}")
+                else:
+                    for proc in top['processes']:
+                        with ui.row().classes('items-center no-wrap w-full').style(
+                                f'gap:14px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04)'):
+                            ui.label(proc['command']).style(
+                                f"flex:1;min-width:0;font-size:11.5px;color:{theme.TEXT};"
+                                f"font-family:'JetBrains Mono',monospace;overflow:hidden;"
+                                f"text-overflow:ellipsis;white-space:nowrap")
+                            ui.label(f"pid {proc['pid']}").style(
+                                f'font-size:10.5px;color:{theme.TEXT_DIM};width:78px')
+                            ui.label(f"{proc['cpu']:.0f}% cpu").style(
+                                f'font-size:10.5px;color:{theme.TEXT_MUTED};width:70px;text-align:right')
+                            ui.label(_human(proc['rss'])).style(
+                                f'font-size:10.5px;color:{theme.TEXT_MUTED};width:78px;text-align:right')
+
+            elif kind == 'disks':
+                for d in res.get('disks') or []:
+                    if not d['ok']:
+                        _unknown_box(f"{d['label']} ({d['path']}) — {d['error']}")
+                        continue
+                    with ui.column().style('gap:5px;width:100%;margin-bottom:12px'):
+                        with ui.row().classes('items-center no-wrap w-full').style('gap:10px'):
+                            ui.label(f"{d['label']} · {d['path']}").style(
+                                f"font-size:12px;font-weight:600;color:{theme.TEXT};"
+                                f"font-family:'JetBrains Mono',monospace")
+                            ui.space()
+                            ui.label(f"{_human(d['free'])} free of {_human(d['total'])}").style(
+                                f'font-size:11px;color:{theme.TEXT_MUTED}')
+                        pct = d['used_pct'] or 0
+                        with ui.element('div').style(
+                                'height:6px;border-radius:3px;width:100%;background:rgba(255,255,255,0.07)'):
+                            ui.element('div').style(
+                                f'height:100%;border-radius:3px;width:{min(pct, 100)}%;background:'
+                                + (theme.RED if pct > 90 else theme.AMBER if pct > 80 else theme.GREEN))
+
+            elif kind == 'temps':
+                temps = res.get('temps') or {}
+                if not temps.get('ok'):
+                    _unknown_box(f"Could not read temperatures — {temps.get('error')}")
+                elif not temps.get('zones'):
+                    _unknown_box('No thermal zones exposed by this kernel.')
+                else:
+                    for zone in temps['zones']:
+                        with ui.row().classes('items-center no-wrap w-full').style(
+                                'gap:14px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04)'):
+                            ui.label(zone['name']).style(
+                                f"flex:1;font-size:11.5px;color:{theme.TEXT};"
+                                f"font-family:'JetBrains Mono',monospace")
+                            ui.label(f"{zone['celsius']:.1f} °C").style(
+                                f'font-size:12px;font-weight:600;color:'
+                                + (theme.RED if zone['celsius'] >= 85 else
+                                   theme.AMBER if zone['celsius'] >= 75 else theme.TEXT))
+        dialog.open()
+
+    def _resource_card(kind, icon, label, value, sub, tone, ok=True, error=None):
+        border = (f'1px dashed rgba(147,153,178,0.5)' if not ok
+                  else f'1px solid {theme.BORDER}')
+        with ui.column().classes('cursor-pointer' if ok else '').style(
+                f'background:{theme.CARD_BG if ok else "rgba(255,255,255,0.02)"};border:{border};'
+                f'border-radius:11px;padding:15px 16px;gap:7px'
+        ).on('click', lambda _, k=kind: show_resource_detail(k) if ok else None).mark(f'resource-{kind}'):
+            with ui.row().classes('items-center no-wrap').style(
+                    f'color:{tone};font-size:10.5px;font-weight:700;gap:8px;letter-spacing:0.06em'):
+                ui.icon(icon).style('font-size:12px')
+                ui.label(label)
+            if not ok:
+                ui.label('Cannot tell').style(
+                    f'font-size:17px;font-weight:800;color:{theme.TEXT_MUTED}')
+                ui.label(str(error)[:70]).style(f'font-size:10.5px;color:{theme.TEXT_MUTED}')
+                return
+            ui.label(value).style(f'font-size:22px;font-weight:800;color:{tone};line-height:1')
+            ui.label(sub).style(f'font-size:10.5px;color:{theme.TEXT_MUTED}')
 
     @ui.refreshable
-    def render_metrics():
-        status = state['status'] or {}
-        disk = status.get('disk', {})
-        memory = status.get('memory', {})
-        daemon_active = status.get('daemon_active', False)
+    def render_resources():
+        res = state['resources']
+        if res is None:
+            ui.element('div').classes('nq-skel').style(
+                'height:96px;border-radius:11px;background:rgba(255,255,255,0.04);width:100%')
+            return
 
-        with ui.grid(columns=3).style('gap:14px;width:100%'):
-            with ui.column().style(
-                    f'background:{theme.CARD_BG};border:1px solid {theme.BORDER};border-radius:11px;padding:16px'):
-                with ui.row().classes('items-center no-wrap').style(
-                        f'color:{theme.ACCENT};font-size:11.5px;font-weight:700;gap:8px;margin-bottom:10px'):
-                    ui.icon('fa-solid fa-hard-drive')
-                    ui.label('/MNT/MULTIMEDIA STORAGE')
-                if disk.get('total'):
-                    free_gb = disk['free'] / 1073741824
-                    total_gb = disk['total'] / 1073741824
-                    color = theme.RED if disk.get('free_pct', 100) < 10 else theme.TEXT
-                    ui.label(f'{free_gb:.1f} GB Free').style(f'font-size:20px;font-weight:700;color:{color}')
-                    ui.label(f'Out of {total_gb:.1f} GB Total').style(f'font-size:11.5px;color:{theme.TEXT_MUTED}')
-                elif disk.get('error'):
-                    ui.label('NOT MOUNTED').style(f'font-size:20px;font-weight:700;color:{theme.RED}')
-                    ui.label(disk['error']).style(f'font-size:11.5px;color:{theme.TEXT_MUTED}')
-                else:
-                    ui.label('Unavailable').style(f'font-size:20px;font-weight:700;color:{theme.TEXT}')
+        with ui.grid(columns=4).style('gap:14px;width:100%'):
+            cpu = res.get('cpu') or {}
+            if cpu.get('ok'):
+                load1 = cpu['load'][0]
+                per_core = load1 / max(cpu['cores'], 1)
+                tone = theme.RED if per_core > 1.5 else theme.AMBER if per_core > 0.9 else theme.GREEN
+                _resource_card('cpu', 'fa-solid fa-microchip', 'CPU LOAD', f'{load1:.2f}',
+                               f"{cpu['cores']} cores · {per_core * 100:.0f}% per core", tone)
+            else:
+                _resource_card('cpu', 'fa-solid fa-microchip', 'CPU LOAD', '', '',
+                               theme.TEXT_MUTED, ok=False, error=cpu.get('error'))
 
-            with ui.column().style(
-                    f'background:{theme.CARD_BG};border:1px solid {theme.BORDER};border-radius:11px;padding:16px'):
-                with ui.row().classes('items-center no-wrap').style(
-                        f'color:{theme.AMBER};font-size:11.5px;font-weight:700;gap:8px;margin-bottom:10px'):
-                    ui.icon('fa-solid fa-memory')
-                    ui.label('PLEX MEMORY')
-                ui.label(memory.get('plex', 'Unknown')).style(
-                    f'font-size:20px;font-weight:700;color:{theme.TEXT}')
-                ui.label('Hard Limit: 4.00GB').style(f'font-size:11.5px;color:{theme.TEXT_MUTED}')
+            mem = res.get('memory') or {}
+            if mem.get('ok'):
+                pct = mem['used_pct'] or 0
+                swap_pct = mem.get('swap_used_pct')
+                # Swap exhaustion is the interesting signal, not RAM percentage: a full
+                # swap with RAM this tight is the machine with nowhere left to go.
+                tone = (theme.RED if pct > 92 or (swap_pct or 0) > 95 else
+                        theme.AMBER if pct > 80 else theme.GREEN)
+                _resource_card('memory', 'fa-solid fa-memory', 'MEMORY', f'{pct:.0f}%',
+                               f"{_human(mem['available'])} available · swap "
+                               + (f'{swap_pct:.0f}% used' if swap_pct is not None else 'n/a'), tone)
+            else:
+                _resource_card('memory', 'fa-solid fa-memory', 'MEMORY', '', '',
+                               theme.TEXT_MUTED, ok=False, error=mem.get('error'))
 
-            with ui.column().style(
-                    f'background:{theme.CARD_BG};border:1px solid {theme.BORDER};border-radius:11px;padding:16px'):
-                with ui.row().classes('items-center no-wrap').style(
-                        f'color:{theme.GREEN};font-size:11.5px;font-weight:700;gap:8px;margin-bottom:10px'):
-                    ui.icon('fa-solid fa-microchip')
-                    ui.label('DAEMON STATUS')
-                status_text = 'Active (Running)' if daemon_active else 'Failed / Stopped'
-                status_color = theme.GREEN if daemon_active else theme.RED
-                ui.label(status_text).style(f'font-size:20px;font-weight:700;color:{status_color}')
-                ui.label('media-curator.service').style(f'font-size:11.5px;color:{theme.TEXT_MUTED}')
+            disks = res.get('disks') or []
+            broken = [d for d in disks if not d['ok']]
+            if broken:
+                _resource_card('disks', 'fa-solid fa-hard-drive', 'DISKS', '', '',
+                               theme.TEXT_MUTED, ok=False,
+                               error=f"{broken[0]['label']}: {broken[0]['error']}")
+            elif disks:
+                worst = max(disks, key=lambda d: d['used_pct'] or 0)
+                tone = (theme.RED if (worst['used_pct'] or 0) > 90 else
+                        theme.AMBER if (worst['used_pct'] or 0) > 80 else theme.GREEN)
+                _resource_card('disks', 'fa-solid fa-hard-drive', 'DISKS',
+                               f"{worst['used_pct']:.0f}%",
+                               f"{worst['label']} fullest · {_human(worst['free'])} free", tone)
+
+            temps = res.get('temps') or {}
+            zones = temps.get('zones') or []
+            if temps.get('ok') and zones:
+                hottest = max(zones, key=lambda z: z['celsius'])
+                tone = (theme.RED if hottest['celsius'] >= 85 else
+                        theme.AMBER if hottest['celsius'] >= 75 else theme.GREEN)
+                _resource_card('temps', 'fa-solid fa-temperature-half', 'TEMPERATURE',
+                               f"{hottest['celsius']:.0f} °C",
+                               f"{hottest['name']} · {len(zones)} zones", tone)
+            else:
+                _resource_card('temps', 'fa-solid fa-temperature-half', 'TEMPERATURE', '', '',
+                               theme.TEXT_MUTED, ok=False,
+                               error=temps.get('error') or 'no thermal zones')
 
     @ui.refreshable
     def render_logs():
@@ -462,7 +746,6 @@ def build():
         if client_alive():
             state['status'] = status
             render_containers.refresh()
-            render_metrics.refresh()
 
     async def refresh_logs():
         logs = await run.io_bound(system.get_logs)
@@ -471,6 +754,14 @@ def build():
         if client_alive():
             state['logs'] = logs
             render_logs.refresh()
+
+    async def refresh_resources():
+        res = await run.io_bound(system.get_host_resources)
+        if res is None:
+            return
+        if client_alive():
+            state['resources'] = res
+            render_resources.refresh()
 
     async def refresh_errors():
         errors = await run.io_bound(system.get_errors)
@@ -486,6 +777,7 @@ def build():
 
     async def refresh_all():
         await refresh_errors()
+        await refresh_resources()
         await refresh_status()
 
     # ---------- AI context ----------
@@ -555,8 +847,8 @@ def build():
         _section_label('STACK HEALTH')
         render_containers()
 
-        _section_label('RESOURCES & METRICS')
-        render_metrics()
+        _section_label('RESOURCES')
+        render_resources()
 
         with ui.row().classes('items-center no-wrap').style('margin:28px 0 12px;gap:10px'):
             ui.label('DAEMON LOG (LAST 100 LINES)').style(
@@ -566,7 +858,9 @@ def build():
         render_logs()
 
     ui.timer(0.05, refresh_errors, once=True)
+    ui.timer(0.05, refresh_resources, once=True)
     ui.timer(0.05, refresh_status, once=True)
     ui.timer(0.05, refresh_logs, once=True)
     ui.timer(15.0, refresh_status)
+    ui.timer(15.0, refresh_resources)
     ui.timer(30.0, refresh_errors)

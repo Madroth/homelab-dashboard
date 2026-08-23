@@ -132,12 +132,33 @@ def _errors(entries, ok=True, error=None):
             'sources': {'journal-user': {'ok': ok, 'error': error}}}
 
 
-def _stub_page(monkeypatch, *, errors, units=None, status=None):
+_HEALTHY_RESOURCES = {
+    'ok': True, 'error': None,
+    'cpu': {'ok': True, 'error': None, 'cores': 8, 'load': [1.2, 1.0, 0.9],
+            'psi': {'ok': True, 'error': None, 'some_avg10': 0.4}},
+    'memory': {'ok': True, 'error': None, 'total': 16 * 1024**3, 'available': 8 * 1024**3,
+               'used': 8 * 1024**3, 'used_pct': 50.0, 'swap_total': 4 * 1024**3,
+               'swap_free': 4 * 1024**3, 'swap_used_pct': 0.0,
+               'psi': {'ok': True, 'error': None, 'some_avg10': 0.0}},
+    'disks': [{'label': 'root', 'path': '/', 'ok': True, 'error': None,
+               'total': 200 * 1024**3, 'used': 100 * 1024**3, 'free': 100 * 1024**3,
+               'used_pct': 50.0}],
+    'temps': {'ok': True, 'error': None, 'zones': [{'name': 'x86_pkg_temp', 'celsius': 55.0}]},
+}
+
+
+def _stub_page(monkeypatch, *, errors, units=None, status=None, resources=None):
     monkeypatch.setattr(system_service, 'get_errors', lambda *a, **kw: errors)
     monkeypatch.setattr(system_service, 'get_units',
                         lambda *a, **kw: units or {'ok': True, 'units': [], 'error': None})
     monkeypatch.setattr(system_service, 'get_status', lambda *a, **kw: status or _HEALTHY_STATUS)
     monkeypatch.setattr(system_service, 'get_logs', lambda *a, **kw: [])
+    # Keep the page off the real machine: without this the resource panel reads this
+    # host's live /proc during the test run.
+    monkeypatch.setattr(system_service, 'get_host_resources',
+                        lambda *a, **kw: resources or _HEALTHY_RESOURCES)
+    monkeypatch.setattr(system_service, 'get_top_processes',
+                        lambda *a, **kw: {'ok': True, 'error': None, 'processes': []})
 
 
 @pytest.mark.nicegui_main_file('test_lab_health.py')
@@ -322,3 +343,108 @@ def test_normalise_leaves_the_displayed_message_untouched():
     assert system_service._normalise_message('pid [12345] failed at 0xdeadbeef after 90s') == \
         'pid [N] failed at 0xN after Ns'
     assert system_service._normalise_message('disk 1 offline') == 'disk 1 offline'
+
+
+# ---------- F2 / F3 ----------
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_containers_are_grouped_by_compose_project(user: User, monkeypatch):
+    """54 containers across 13 projects: one flat grid buries everything under media."""
+    status = dict(_HEALTHY_STATUS, containers=[
+        {'Names': 'plex', 'Status': 'Up 2 hours',
+         'Labels': 'com.docker.compose.project=media-curator'},
+        {'Names': 'plane-app-api-1', 'Status': 'Up 16 hours',
+         'Labels': 'com.docker.compose.project=plane-app'},
+        {'Names': 'stray', 'Status': 'Up 1 hour', 'Labels': ''},
+    ])
+    _stub_page(monkeypatch, errors=_errors([]), status=status)
+    await user.open('/lab-health-test')
+    await user.should_see('media-curator')
+    await user.should_see('plane-app')
+    await user.should_see('ungrouped')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_clicking_a_container_shows_health_and_live_usage(user: User, monkeypatch):
+    status = dict(_HEALTHY_STATUS, containers=[
+        {'Names': 'gluetun', 'Status': 'Up 3 hours (unhealthy)',
+         'Labels': 'com.docker.compose.project=media-curator'}])
+    _stub_page(monkeypatch, errors=_errors([]), status=status)
+    monkeypatch.setattr(system_service, 'get_container_detail', lambda *a, **kw: {
+        'ok': True, 'error': None, 'name': 'gluetun', 'state': 'running',
+        'health': 'unhealthy', 'restarts': 14, 'started_at': '', 'finished_at': '',
+        'exit_code': 0, 'oom_killed': False, 'image': 'qmcgaw/gluetun:v3',
+        'project': 'media-curator', 'service': 'gluetun',
+        'ports': ['0.0.0.0:8090 -> 8090/tcp'], 'mounts': [],
+        'stats': {'cpu': '3.20%', 'mem': '48MiB / 15GiB', 'mem_pct': '0.31%',
+                  'net': '1MB / 2MB', 'block': '0B / 0B', 'pids': '12'},
+        'stats_error': None, 'logs': ['tunnel down, retrying'], 'log_error': None})
+
+    await user.open('/lab-health-test')
+    await user.should_see('gluetun')
+    user.find(marker='container-gluetun').click()
+    await asyncio.sleep(0.3)
+    await user.should_see('unhealthy')     # its own healthcheck, not just "running"
+    await user.should_see('3.20%')         # live usage
+    await user.should_see('tunnel down, retrying')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_running_container_with_no_healthcheck_does_not_claim_health(
+        user: User, monkeypatch):
+    """A container with no healthcheck declared is not the same as a healthy one."""
+    status = dict(_HEALTHY_STATUS, containers=[
+        {'Names': 'dozzle', 'Status': 'Up 1 hour', 'Labels': ''}])
+    _stub_page(monkeypatch, errors=_errors([]), status=status)
+    monkeypatch.setattr(system_service, 'get_container_detail', lambda *a, **kw: {
+        'ok': True, 'error': None, 'name': 'dozzle', 'state': 'running', 'health': None,
+        'restarts': 0, 'started_at': '', 'finished_at': '', 'exit_code': 0,
+        'oom_killed': False, 'image': 'amir20/dozzle', 'project': None, 'service': None,
+        'ports': [], 'mounts': [], 'stats': None, 'stats_error': None,
+        'logs': [], 'log_error': None})
+
+    await user.open('/lab-health-test')
+    await user.should_see('dozzle')   # wait for the async first read
+    user.find(marker='container-dozzle').click()
+    await asyncio.sleep(0.3)
+    await user.should_see('no healthcheck declared')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_resource_cards_render_from_the_reader(user: User, monkeypatch):
+    _stub_page(monkeypatch, errors=_errors([]))
+    await user.open('/lab-health-test')
+    await user.should_see('CPU LOAD')
+    await user.should_see('MEMORY')
+    await user.should_see('TEMPERATURE')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_an_unreadable_resource_says_cannot_tell_rather_than_zero(user: User, monkeypatch):
+    """A panel rendering 0% because /proc could not be read is worse than one that
+    admits it does not know."""
+    broken = dict(_HEALTHY_RESOURCES, ok=False,
+                  memory={'ok': False, 'error': 'PermissionError: /proc/meminfo'})
+    _stub_page(monkeypatch, errors=_errors([]), resources=broken)
+    await user.open('/lab-health-test')
+    await user.should_see('Cannot tell')
+    await user.should_see('/proc/meminfo')
+
+
+def test_host_resources_refuses_to_read_the_nas_when_it_is_not_mounted(monkeypatch):
+    """The original sin: /mnt/Multimedia exists as a plain directory when the NAS is
+    away, so disk_usage() reports the root SSD's numbers under the NAS's name."""
+    monkeypatch.setattr(system_service.os.path, 'ismount', lambda p: False)
+    res = system_service.get_host_resources()
+    nas = next(d for d in res['disks'] if d['label'] == 'NAS')
+    assert nas['ok'] is False
+    assert 'NOT MOUNTED' in nas['error']
+    assert 'total' not in nas          # no plausible-looking number from another disk
+    assert res['ok'] is False
+
+
+def test_psi_reports_unreadable_rather_than_zero(monkeypatch):
+    monkeypatch.setattr(system_service, '_read_proc', lambda p: (False, 'OSError: nope'))
+    psi = system_service._psi('/proc/pressure/memory')
+    assert psi['ok'] is False and 'nope' in psi['error']
+    assert 'some_avg10' not in psi
