@@ -16,6 +16,43 @@ def _get_conn():
     return conn
 
 
+def get_rejected() -> list[dict]:
+    """Rejected items and whether their files are still on disk.
+
+    Rejection moves media to /mnt/Multimedia/Rejected rather than deleting it
+    (media-curator commit 531f26d), so these files sit there until a human
+    removes them. Nothing else surfaces that, which is the point of this view:
+    without it the Rejected folder silently accumulates.
+
+    `on_disk` is False for rows rejected before that change, whose files really
+    were deleted, and for anything already cleared out by hand.
+    """
+    if not os.path.exists(MEDIA_DB):
+        return []
+    conn = _get_conn()
+    try:
+        cols = {r[1] for r in conn.execute('PRAGMA table_info(media_queue)')}
+        path_col = 'rejected_path' if 'rejected_path' in cols else 'NULL AS rejected_path'
+        rows = conn.execute(
+            f"""SELECT id, original_filename, proposed_title, media_type, created_at,
+                       status, {path_col}
+                  FROM media_queue
+                 WHERE status IN ('rejected', 'rejected_kept')
+                 ORDER BY created_at DESC LIMIT 100""").fetchall()
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+    out = []
+    for r in rows:
+        d = dict(r)
+        rp = d.get('rejected_path')
+        d['on_disk'] = bool(rp and os.path.exists(rp))
+        out.append(d)
+    return out
+
+
 def get_queue(search: str = '', media_type: str = '', status: str = '') -> list[dict]:
     if not os.path.exists(MEDIA_DB):
         return []

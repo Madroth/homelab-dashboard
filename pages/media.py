@@ -138,7 +138,7 @@ MEDIA_FILTERS = [('', 'All')] + MEDIA_TYPES
 
 
 def build():
-    state = {'queue': [], 'type_filter': '', 'selected_ids': set()}
+    state = {'queue': [], 'rejected': [], 'type_filter': '', 'selected_ids': set()}
     # Per-item @ui.refreshable closures (created lazily, keyed by item id) -- lets a
     # single-item change (select, approve, reject, edit) re-render just that one row
     # instead of render_queue.refresh()'s full-queue rebuild (all visible items torn
@@ -293,6 +293,39 @@ def build():
                             f'details-{iid}').props('flat').style(f'color:{theme.TEXT_MUTED}')
 
     @ui.refreshable
+    def render_rejected():
+        """What is sitting in the Rejected folder waiting to be deleted.
+
+        Rejection moves files aside rather than deleting them, so without a view
+        like this the folder fills up silently and nobody knows. Only rows whose
+        file is still on disk are shown -- older rows, from when reject really
+        did delete, have nothing left to clear.
+        """
+        items = [i for i in state.get('rejected', []) if i.get('on_disk')]
+        if not items:
+            return
+        with ui.column().style(
+                f'border:1.5px solid rgba(255,180,80,0.25);border-radius:11px;'
+                f'padding:12px 14px;width:100%;gap:8px;margin-bottom:12px;'
+                f'background:rgba(255,180,80,0.05)'):
+            with ui.row().classes('items-center no-wrap').style('gap:8px'):
+                ui.icon('delete_outline').style('color:#ffb450;font-size:18px')
+                ui.label(f'{len(items)} rejected item'
+                         f'{"s" if len(items) != 1 else ""} awaiting deletion').style(
+                    f'font-size:13.5px;font-weight:700;color:{theme.TEXT}')
+            ui.label('Moved out of the pipeline, not deleted. Remove them yourself when '
+                     'you are sure.').style(f'font-size:11.5px;color:{theme.TEXT_DIM}')
+            for it in items[:20]:
+                with ui.column().style('gap:2px;width:100%'):
+                    ui.label(it.get('proposed_title') or it['original_filename']).style(
+                        f'font-size:12.5px;color:{theme.TEXT};word-break:break-all')
+                    ui.label(it.get('rejected_path') or '').style(
+                        f'font-size:11px;color:{theme.TEXT_DIM};word-break:break-all')
+            if len(items) > 20:
+                ui.label(f'...and {len(items) - 20} more').style(
+                    f'font-size:11.5px;color:{theme.TEXT_DIM}')
+
+    @ui.refreshable
     def render_queue():
         queue = filtered_queue()
         if not queue:
@@ -317,7 +350,13 @@ def build():
         live_state.refresh_all(exclude='media')
 
     async def do_reject(item_id):
-        if not await confirm('Reject this media item?', 'This cannot be undone.',
+        # Reject stopped deleting on 2026-08-22 -- it moves the file to
+        # /mnt/Multimedia/Rejected and leaves it for a human. Saying "cannot be
+        # undone" would now be false, and would make people hesitate over an
+        # action that is actually recoverable.
+        if not await confirm('Reject this media item?',
+                              'The file moves to the Rejected folder. Nothing is deleted -- '
+                              'clear that folder yourself when you are sure.',
                               confirm_label='Reject', danger=True):
             return
         result = await run.io_bound(media.reject, str(item_id))
@@ -377,6 +416,8 @@ def build():
         if not client_alive():
             return
         state['queue'] = queue
+        state['rejected'] = await run.io_bound(media.get_rejected) or []
+        render_rejected.refresh()
         after_ids = [i['id'] for i in filtered_queue()]
         if changed_id is not None and before_ids == after_ids and changed_id in row_refreshables:
             _get_row_refreshable(changed_id).refresh()
@@ -424,6 +465,7 @@ def build():
         ui.label('MEDIA QUEUE').style(
             f'font-size:11.5px;font-weight:700;letter-spacing:0.5px;color:{theme.TEXT_DIM};margin-bottom:12px')
         with ui.column().style('gap:14px;width:100%'):
+            render_rejected()
             render_queue()
 
     ui.timer(0.05, reload, once=True)

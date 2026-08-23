@@ -171,3 +171,10 @@
         layer is untested and is the other half of the exposed surface.
   - [ ] Decide whether this stays an import-the-internals arrangement or gets a real boundary.
         Recorded as tech debt in media-curator's EPICS Epic 7; nobody owns it yet.
+
+- [ ] **`test_toggle_select_timing_with_large_queue` is flaky (2026-08-22)** — it asserts a
+  wall-clock budget (`< 0.5s`) and fails intermittently on a loaded machine. Measured on clean
+  `HEAD`, unrelated to any change: 2 of 3 consecutive runs failed. A timing threshold in a test
+  suite that shares a host with a game server and a media daemon will keep doing this. Either
+  raise the budget substantially, mark it as a benchmark that does not gate the suite, or
+  measure work done rather than seconds elapsed.
