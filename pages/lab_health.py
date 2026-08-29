@@ -60,6 +60,14 @@ def _ago(ts: float) -> str:
     return f'{int(delta // 86400)}d ago'
 
 
+def _duration(seconds: float) -> str:
+    if seconds < 90:
+        return f'{int(seconds)}s'
+    if seconds < 5400:
+        return f'{int(seconds // 60)}m'
+    return f'{seconds / 3600:.1f}h'
+
+
 def _clock(ts: float) -> str:
     import time as _t
     return _t.strftime('%H:%M:%S', _t.localtime(ts)) if ts else '--:--:--'
@@ -233,6 +241,73 @@ def build():
 
     # ---------- errors ----------
 
+    CORRELATION_WINDOW = 300.0
+
+    def _render_correlation(entry: dict):
+        """F10. The CIFS flap is the case that argues for this: the NAS timing out and the
+        media containers stalling are one event seen twice, and reading either alone tells
+        you the wrong story. So an error detail also answers "what else happened around
+        this time".
+
+        Two sources, and both are careful about what they do not know. Neighbouring errors
+        come from the same 24h read already on screen, so the window can only ever be as
+        complete as that list. Resource context comes from the F11 ring buffer, which is
+        short and only fills while the page is open -- for most historical errors there
+        will be nothing, and it says so rather than implying the machine was idle.
+        """
+        at = entry['at']
+        # A collapsed run of repeats is an interval, not an instant: widen to cover it.
+        first_at = entry.get('first_at', at)
+        lo, hi = min(at, first_at) - CORRELATION_WINDOW, at + CORRELATION_WINDOW
+
+        errors = (state['errors'] or {}).get('entries') or []
+        near = [e for e in errors
+                if e is not entry and lo <= e['at'] <= hi]
+        near.sort(key=lambda e: abs(e['at'] - at))
+
+        window_text = _duration(CORRELATION_WINDOW)
+        ui.label(f'AROUND THIS TIME — ±{window_text}').style(
+            f'font-size:9px;font-weight:700;letter-spacing:0.08em;color:{theme.TEXT_DIM};'
+            f'margin-top:14px')
+
+        if not near:
+            ui.label('No other error was logged in this window.').style(
+                f'font-size:11px;color:{theme.TEXT_MUTED};margin-bottom:6px')
+        else:
+            with ui.column().style('gap:4px;width:100%;margin-bottom:6px'):
+                for other in near[:6]:
+                    delta = other['at'] - at
+                    sign = 'after' if delta >= 0 else 'before'
+                    color = SEVERITY_COLORS.get(other['severity'], theme.TEXT_MUTED)
+                    with ui.row().classes('items-center no-wrap w-full').style(
+                            f'gap:10px;padding:6px 10px;border-radius:7px;'
+                            f'background:rgba(255,255,255,0.03)'):
+                        ui.element('div').style(
+                            f'width:6px;height:6px;border-radius:50%;background:{color};flex:none')
+                        ui.label(other['origin']).style(
+                            f"font-size:10.5px;font-weight:600;color:{theme.TEXT};flex:none;"
+                            f"width:170px;font-family:'JetBrains Mono',monospace;overflow:hidden;"
+                            f"text-overflow:ellipsis;white-space:nowrap")
+                        ui.label(other['message']).style(
+                            f'flex:1;min-width:0;font-size:10.5px;color:{theme.TEXT_MUTED};'
+                            f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap')
+                        ui.label(f'{_duration(abs(delta))} {sign}').style(
+                            f'font-size:10px;color:{theme.TEXT_DIM};flex:none;width:74px;'
+                            f'text-align:right')
+            if len(near) > 6:
+                ui.label(f'and {len(near) - 6} more in this window').style(
+                    f'font-size:10px;color:{theme.TEXT_DIM};margin-bottom:6px')
+
+        window = system.resource_window(at, CORRELATION_WINDOW)
+        if not window['ok']:
+            ui.label(f"Resource readings: {window['reason']}.").style(
+                f'font-size:10.5px;color:{theme.TEXT_DIM}')
+            return
+        parts = [f"{m['label']} {m['min']:.0f}–{m['max']:.0f}%"
+                 for m in window['metrics'].values()]
+        ui.label(f"Resource readings around then ({window['samples']} samples): "
+                 + ' · '.join(parts)).style(f'font-size:10.5px;color:{theme.TEXT_MUTED}')
+
     def show_error_detail(entry: dict):
         with ui.dialog() as dialog, ui.card().style(
                 f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);'
@@ -290,6 +365,8 @@ def build():
                         f"flex:1;min-width:0;font-family:'JetBrains Mono',monospace;font-size:11px;"
                         f"color:{theme.TEXT_MUTED};user-select:text;overflow-x:auto;white-space:nowrap")
                     _copy(probe, 'Copy')
+
+            _render_correlation(entry)
 
             with ui.row().classes('justify-end w-full').style('gap:10px;margin-top:14px'):
                 _copy(entry['message'], 'Copy error')
@@ -658,6 +735,25 @@ def build():
             n /= 1024
         return f'{n:.1f} TB'
 
+    def _trend_row(metric: str):
+        """F11. Says where a number came from, or says it cannot yet -- never a rate
+        invented from too few readings. The span shown is the one actually covered,
+        because sampling only happens while somebody has this page open."""
+        t = system.resource_trend(metric)
+        if not t['ok']:
+            ui.label(f"{t['label']}: {t['reason']}").style(
+                f'font-size:10.5px;color:{theme.TEXT_DIM};margin-bottom:10px')
+            return
+        tone = (theme.AMBER if t['direction'] == 'rising' else
+                theme.GREEN if t['direction'] == 'falling' else theme.TEXT_MUTED)
+        arrow = {'rising': '↑', 'falling': '↓', 'steady': '→'}[t['direction']]
+        with ui.row().classes('items-center no-wrap').style('gap:8px;margin-bottom:10px'):
+            ui.label(arrow).style(f'font-size:13px;font-weight:700;color:{tone}')
+            ui.label(f"{t['label']} {t['first']:.0f}% → {t['last']:.0f}%").style(
+                f'font-size:12px;font-weight:600;color:{tone}')
+            ui.label(f"across {_duration(t['span'])} of readings · {t['samples']} samples").style(
+                f'font-size:10.5px;color:{theme.TEXT_DIM}')
+
     def show_resource_detail(kind: str):
         res = state['resources'] or {}
         with ui.dialog() as dialog, ui.card().style(
@@ -693,6 +789,12 @@ def build():
                                            theme.AMBER if (value or 0) > 5 else theme.TEXT))
                     else:
                         _unknown_box(f"Pressure unavailable — {psi.get('error')}")
+
+                    if kind == 'cpu':
+                        _trend_row('cpu')
+                    else:
+                        _trend_row('memory')
+                        _trend_row('swap')
 
                     if kind == 'memory':
                         with ui.row().classes('items-center').style('gap:22px;margin-bottom:10px'):

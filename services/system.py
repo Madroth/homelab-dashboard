@@ -1,3 +1,4 @@
+import collections
 import json
 import os
 import re
@@ -489,7 +490,108 @@ def get_host_resources() -> dict:
         res['error'] = '; '.join(
             [f"{k}: {res[k].get('error')}" for k in problems]
             + [f"{d['label']}: {d['error']}" for d in disks if not d['ok']])
+    _record_sample(res)
     return res
+
+
+# F11. A bounded, in-process memory of recent readings: 60 samples, dropped on restart,
+# never written anywhere and never queried by anything but the panel that shows it. It
+# exists to answer "is this climbing?", which a bare percentage cannot. It is deliberately
+# NOT a time-series store -- nothing is persisted, no history is retained across a restart,
+# and no alert is ever derived from it. That line is what keeps it inside MONITORING.md's
+# anti-goals rather than being the first inch of a metrics stack.
+#
+# Sampling is demand-driven: a sample is recorded when a page actually reads resources, so
+# the window this covers depends on whether anyone had the page open, and how many tabs.
+# Rather than paper over that with a fixed "over the last five minutes", every sample
+# carries its own timestamp, the trend reports the span it genuinely covers, and it refuses
+# to report at all when the readings are too few or too closely spaced to mean anything.
+# A confident rate computed from three samples two seconds apart would be the same species
+# of lie as a stale number rendered as current.
+_TREND_SAMPLES = 60
+_TREND_MIN_GAP = 5.0      # several open tabs polling together are one reading, not three
+_TREND_MIN_SPAN = 60.0    # under a minute, "rising" is indistinguishable from noise
+_TREND_MIN_POINTS = 3
+_TREND_FLAT = 2.0         # percentage points; below this it is steady, not a direction
+
+_resource_history: collections.deque = collections.deque(maxlen=_TREND_SAMPLES)
+
+_TREND_LABELS = {'cpu': 'CPU load', 'memory': 'Memory used', 'swap': 'Swap used'}
+
+
+def _sample_of(res: dict) -> dict:
+    """Scalars only, and None wherever the reader failed -- a sub-reader that could not
+    answer must never enter the history as a plausible zero."""
+    def pct(block: dict, key: str):
+        return block.get(key) if block.get('ok') else None
+
+    cpu = res.get('cpu') or {}
+    mem = res.get('memory') or {}
+    load = cpu.get('load') or []
+    cores = cpu.get('cores') or 1
+    return {
+        'at': res.get('read_at') or time.time(),
+        'cpu': (load[0] / cores * 100.0) if (cpu.get('ok') and load) else None,
+        'memory': pct(mem, 'used_pct'),
+        'swap': pct(mem, 'swap_used_pct'),
+    }
+
+
+def _record_sample(res: dict) -> None:
+    sample = _sample_of(res)
+    if _resource_history and (sample['at'] - _resource_history[-1]['at']) < _TREND_MIN_GAP:
+        return
+    _resource_history.append(sample)
+
+
+def resource_trend(metric: str) -> dict:
+    """first -> last across however long the samples actually span, or an honest refusal.
+
+    Never extrapolates and never smooths: it reports two real readings, the true interval
+    between them, and how many samples sit in between so the caller can judge the shape.
+    """
+    points = [s for s in _resource_history if s.get(metric) is not None]
+    label = _TREND_LABELS.get(metric, metric)
+    if len(points) < _TREND_MIN_POINTS:
+        return {'ok': False, 'metric': metric, 'label': label,
+                'reason': f'only {len(points)} reading(s) so far — not enough to say'}
+
+    first, last = points[0], points[-1]
+    span = last['at'] - first['at']
+    if span < _TREND_MIN_SPAN:
+        return {'ok': False, 'metric': metric, 'label': label,
+                'reason': f'readings cover only {int(span)}s — too short to call a trend'}
+
+    delta = last[metric] - first[metric]
+    direction = ('rising' if delta > _TREND_FLAT else
+                 'falling' if delta < -_TREND_FLAT else 'steady')
+    return {'ok': True, 'metric': metric, 'label': label, 'reason': None,
+            'first': first[metric], 'last': last[metric], 'delta': delta,
+            'span': span, 'samples': len(points), 'direction': direction}
+
+
+def resource_window(at: float, window: float = 300.0) -> dict:
+    """What the history retained around a moment -- or an honest account of why nothing.
+
+    F10's resource half. Because the buffer is short and only fills while somebody has the
+    page open, most historical errors will have no resource context at all. Saying that
+    plainly beats implying the machine was calm: "no samples" and "nothing was happening"
+    are different answers, and only one of them is knowable here.
+    """
+    lo, hi = at - window, at + window
+    points = [s for s in _resource_history if lo <= s['at'] <= hi]
+    if not points:
+        return {'ok': False, 'samples': 0, 'metrics': {},
+                'reason': 'nothing was retained for that time — readings are kept only '
+                          'while this page is open, and only for the last few minutes'}
+    out = {'ok': True, 'reason': None, 'samples': len(points),
+           'from': points[0]['at'], 'to': points[-1]['at'], 'metrics': {}}
+    for metric in ('cpu', 'memory', 'swap'):
+        values = [s[metric] for s in points if s.get(metric) is not None]
+        if values:
+            out['metrics'][metric] = {'label': _TREND_LABELS[metric],
+                                      'min': min(values), 'max': max(values)}
+    return out
 
 
 def get_top_processes(limit: int = 8) -> dict:

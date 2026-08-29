@@ -600,3 +600,200 @@ async def test_searching_finds_a_healthy_unit_the_summary_view_would_cap_away(
 
     user.find(marker='lab-health-search').type('homelab-dashboard')
     await user.should_see('homelab-dashboard.service')
+
+
+# ---------- F11: short-window rates, without a database ----------
+
+@pytest.fixture
+def clean_history(monkeypatch):
+    import collections
+    buf = collections.deque(maxlen=system_service._TREND_SAMPLES)
+    monkeypatch.setattr(system_service, '_resource_history', buf)
+    return buf
+
+
+def _sample(at, memory=50.0, cpu=10.0, swap=0.0):
+    return {'at': at, 'cpu': cpu, 'memory': memory, 'swap': swap}
+
+
+def test_trend_refuses_to_call_a_direction_from_too_few_readings(clean_history):
+    """Two points and a straight line is how you get a confident number that means
+    nothing. It has to say it cannot tell yet."""
+    now = time.time()
+    clean_history.extend([_sample(now - 300, memory=40.0), _sample(now, memory=88.0)])
+    t = system_service.resource_trend('memory')
+    assert t['ok'] is False
+    assert 'not enough' in t['reason']
+    assert 'last' not in t          # no number offered alongside the refusal
+
+
+def test_trend_refuses_when_the_readings_are_too_close_together(clean_history):
+    """Three samples two seconds apart span nothing. A rate drawn from them would be
+    noise wearing a percentage sign."""
+    now = time.time()
+    clean_history.extend([_sample(now - 4, memory=40.0), _sample(now - 2, memory=60.0),
+                          _sample(now, memory=88.0)])
+    t = system_service.resource_trend('memory')
+    assert t['ok'] is False
+    assert 'too short' in t['reason']
+
+
+def test_trend_reports_the_span_it_actually_covers(clean_history):
+    """The point of the honesty: sampling only happens while the page is open, so the
+    window is whatever it turned out to be -- never a claimed five minutes."""
+    now = time.time()
+    clean_history.extend([_sample(now - 600, memory=40.0), _sample(now - 300, memory=64.0),
+                          _sample(now, memory=88.0)])
+    t = system_service.resource_trend('memory')
+    assert t['ok'] is True
+    assert t['first'] == 40.0 and t['last'] == 88.0
+    assert t['direction'] == 'rising'
+    assert 590 < t['span'] < 610        # the real interval, not a nominal one
+    assert t['samples'] == 3
+
+
+def test_trend_calls_a_small_wobble_steady_rather_than_a_direction(clean_history):
+    now = time.time()
+    clean_history.extend([_sample(now - 600, memory=50.0), _sample(now - 300, memory=51.5),
+                          _sample(now, memory=51.0)])
+    assert system_service.resource_trend('memory')['direction'] == 'steady'
+
+
+def test_a_failed_reader_never_enters_the_history_as_a_zero(clean_history):
+    """Fail-closed, applied to the buffer: an unreadable source must leave a gap, not a
+    plausible number that drags a trend toward it."""
+    res = {'read_at': time.time(),
+           'cpu': {'ok': False, 'error': 'unreadable /proc/loadavg'},
+           'memory': {'ok': True, 'used_pct': 70.0, 'swap_used_pct': 12.0}}
+    system_service._record_sample(res)
+    assert clean_history[-1]['cpu'] is None
+    assert clean_history[-1]['memory'] == 70.0
+
+    # And a metric that is always None never fabricates a trend.
+    now = time.time()
+    clean_history.clear()
+    clean_history.extend([{'at': now - 600, 'cpu': None, 'memory': 40.0, 'swap': None},
+                          {'at': now - 300, 'cpu': None, 'memory': 64.0, 'swap': None},
+                          {'at': now, 'cpu': None, 'memory': 88.0, 'swap': None}])
+    assert system_service.resource_trend('cpu')['ok'] is False
+
+
+def test_simultaneous_reads_from_several_tabs_count_as_one_reading(clean_history):
+    """Three open tabs polling together must not fill the buffer three times as fast --
+    that would silently shrink the window the trend covers."""
+    res = {'read_at': time.time(), 'cpu': {'ok': True, 'cores': 4, 'load': [2.0]},
+           'memory': {'ok': True, 'used_pct': 50.0, 'swap_used_pct': 0.0}}
+    for _ in range(3):
+        system_service._record_sample(res)
+    assert len(clean_history) == 1
+
+
+def test_history_is_bounded_and_drops_the_oldest(clean_history):
+    """Bounded, in-process, dropped on restart -- the thing that keeps this from being
+    a time-series store."""
+    now = time.time()
+    for i in range(200):
+        clean_history.append(_sample(now - (200 - i) * 10, memory=float(i)))
+    assert len(clean_history) == system_service._TREND_SAMPLES == 60
+    assert clean_history[-1]['memory'] == 199.0
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_memory_detail_shows_the_trend_it_can_support(user: User, monkeypatch,
+                                                            clean_history):
+    now = time.time()
+    clean_history.extend([_sample(now - 600, memory=41.0), _sample(now - 300, memory=70.0),
+                          _sample(now, memory=88.0)])
+    _stub_page(monkeypatch, errors=_errors([]))
+    await user.open('/lab-health-test')
+    await user.should_see('MEMORY')
+    user.find(marker='resource-memory').click()
+    await user.should_see('Memory used 41% → 88%')
+    await user.should_see('across 10m of readings')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_memory_detail_says_it_cannot_tell_yet_rather_than_showing_a_flat_line(
+        user: User, monkeypatch, clean_history):
+    _stub_page(monkeypatch, errors=_errors([]))
+    await user.open('/lab-health-test')
+    await user.should_see('MEMORY')
+    user.find(marker='resource-memory').click()
+    await user.should_see('not enough to say')
+
+
+# ---------- F10: the correlation window ----------
+
+def _err(origin, at, message='something failed', severity='error', source='journal-system',
+         count=1, first_at=None):
+    return {'source': source, 'origin': origin, 'at': at, 'count': count,
+            'first_at': first_at if first_at is not None else at,
+            'severity': severity, 'message': message, 'detail': {}}
+
+
+def test_resource_window_says_nothing_was_retained_rather_than_nothing_happened(clean_history):
+    """The distinction that matters: 'no samples' and 'the machine was calm' are
+    different answers, and only one of them is knowable from a five-minute buffer."""
+    w = system_service.resource_window(time.time() - 86400)
+    assert w['ok'] is False
+    assert w['samples'] == 0
+    assert 'nothing was retained' in w['reason']
+    assert w['metrics'] == {}
+
+
+def test_resource_window_reports_the_range_it_saw(clean_history):
+    now = time.time()
+    clean_history.extend([_sample(now - 60, memory=40.0), _sample(now, memory=88.0),
+                          _sample(now + 60, memory=70.0)])
+    w = system_service.resource_window(now, window=300.0)
+    assert w['ok'] is True and w['samples'] == 3
+    assert w['metrics']['memory']['min'] == 40.0
+    assert w['metrics']['memory']['max'] == 88.0
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_error_detail_shows_what_else_happened_around_it(user: User, monkeypatch,
+                                                               clean_history):
+    """The CIFS case: the NAS timing out and a media container stalling are one event
+    seen twice. Reading either alone tells you the wrong story."""
+    now = time.time()
+    _stub_page(monkeypatch, errors=_errors([
+        _err('kernel', now, 'CIFS: VFS: \\\\192.168.1.213 has not responded in 180 seconds'),
+        _err('plex', now - 90, 'container exited with code 137', source='container'),
+        _err('unrelated', now - 7200, 'hours away, not in the window'),
+    ]))
+    await user.open('/lab-health-test')
+    await user.should_see('kernel')
+    user.find(marker=f'error-row-kernel-{int(now)}').click()
+    await user.should_see('AROUND THIS TIME')
+    await user.should_see('container exited with code 137')
+    await user.should_see('1m before')
+    # The 2h-old error is still in the list behind the dialog, so this asserts on the
+    # correlation row itself: nothing that far out earns a place in the window.
+    await user.should_not_see('2.0h before')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_error_detail_admits_it_kept_no_resource_readings_for_an_old_error(
+        user: User, monkeypatch, clean_history):
+    now = time.time()
+    _stub_page(monkeypatch, errors=_errors([_err('kernel', now, 'a lone error')]))
+    await user.open('/lab-health-test')
+    await user.should_see('kernel')
+    user.find(marker=f'error-row-kernel-{int(now)}').click()
+    await user.should_see('No other error was logged in this window')
+    await user.should_see('nothing was retained for that time')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_error_detail_pairs_resource_readings_with_the_error_when_it_has_them(
+        user: User, monkeypatch, clean_history):
+    now = time.time()
+    clean_history.extend([_sample(now - 120, memory=41.0), _sample(now - 60, memory=77.0),
+                          _sample(now, memory=93.0)])
+    _stub_page(monkeypatch, errors=_errors([_err('kernel', now, 'a lone error')]))
+    await user.open('/lab-health-test')
+    await user.should_see('kernel')
+    user.find(marker=f'error-row-kernel-{int(now)}').click()
+    await user.should_see('Memory used 41–93%')
+    await user.should_see('3 samples')
