@@ -23,7 +23,7 @@ def get_status() -> dict:
         return _status_cache['status']
 
     status = {'defcon': [], 'containers': [], 'disk': {}, 'memory': {},
-              'containers_error': None}
+              'containers_error': None, 'read_at': now}
 
     try:
         # Check the mount before reading it. /mnt/Multimedia exists as a plain
@@ -222,7 +222,7 @@ def get_units(manager: str = 'user') -> dict:
                          'sub': row.get('sub', ''),
                          'failed': active == 'failed'})
     rows.sort(key=lambda r: (not r['failed'], r['unit']))
-    return {'ok': not errors, 'units': rows,
+    return {'ok': not errors, 'units': rows, 'read_at': time.time(),
             'error': '; '.join(errors) if errors else None}
 
 
@@ -404,7 +404,7 @@ def _psi(path: str) -> dict:
 
 def get_host_resources() -> dict:
     """CPU, memory, disks and temperature, each reporting its own readability."""
-    res: dict = {'ok': True, 'error': None}
+    res: dict = {'ok': True, 'error': None, 'read_at': time.time()}
 
     ok, raw = _read_proc('/proc/loadavg')
     if ok:

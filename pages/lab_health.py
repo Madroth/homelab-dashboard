@@ -71,10 +71,59 @@ def build():
 
     # ---------- shared chrome ----------
 
-    def _section_label(text: str, top: str = '28px'):
-        ui.label(text).style(
-            f'font-size:11.5px;font-weight:700;letter-spacing:0.5px;color:{theme.TEXT_DIM};'
-            f'margin:{top} 0 12px')
+    def _section_label(text: str, top: str = '28px', stamp=None):
+        label_style = (f'font-size:11.5px;font-weight:700;letter-spacing:0.5px;'
+                       f'color:{theme.TEXT_DIM}')
+        if stamp is None:
+            ui.label(text).style(f'{label_style};margin:{top} 0 12px')
+            return
+        with ui.row().classes('items-center no-wrap w-full').style(
+                f'margin:{top} 0 12px;gap:10px'):
+            ui.label(text).style(label_style)
+            ui.space()
+            stamp()
+
+    # F6. Every panel states when its data was read, because the alternative is the
+    # failure this page was built to stop: a plausible-looking number that is actually
+    # minutes old. The stamp turns amber on its own once the reading ages past the
+    # panel's own poll interval, so a poll that has quietly died shows as stale rather
+    # than as calm -- which is why the stamps tick on a timer of their own and do not
+    # only repaint when fresh data arrives.
+    def _stamp_for(key: str, stale_after: float, partial=None):
+        is_partial = partial or (lambda d: not d.get('ok', True))
+
+        @ui.refreshable
+        def _stamp():
+            import time as _t
+            mono = "font-family:'JetBrains Mono',monospace"
+            data = state.get(key)
+            if not data:
+                ui.label('READING…').style(
+                    f'font-size:10.5px;letter-spacing:0.06em;color:{theme.TEXT_DIM};{mono}')
+                return
+            read_at = data.get('read_at') or 0
+            stale = not read_at or (_t.time() - read_at) > stale_after
+            text = f'AS OF {_clock(read_at)}'
+            if not read_at:
+                text, tone = 'AS OF UNKNOWN', theme.AMBER
+            elif stale:
+                text, tone = f'{text} · {_ago(read_at)}', theme.AMBER
+            elif is_partial(data):
+                text, tone = f'{text} · PARTIAL', theme.AMBER
+            else:
+                tone = theme.TEXT_MUTED
+            ui.label(text).style(
+                f'font-size:10.5px;font-weight:600;letter-spacing:0.04em;color:{tone};{mono}')
+
+        return _stamp
+
+    # Stale thresholds are 2x the panel's poll below, so one missed tick is tolerated
+    # and two is reported.
+    stamp_errors = _stamp_for('errors', 60.0)
+    stamp_units = _stamp_for('units', 60.0)
+    stamp_containers = _stamp_for(
+        'status', 30.0, partial=lambda d: bool(d.get('containers_error')))
+    stamp_resources = _stamp_for('resources', 30.0)
 
     def _unknown_box(message: str):
         """The load-bearing visual: a dashed, muted panel that can never be mistaken
@@ -746,6 +795,7 @@ def build():
         if client_alive():
             state['status'] = status
             render_containers.refresh()
+            stamp_containers.refresh()
 
     async def refresh_logs():
         logs = await run.io_bound(system.get_logs)
@@ -762,6 +812,7 @@ def build():
         if client_alive():
             state['resources'] = res
             render_resources.refresh()
+            stamp_resources.refresh()
 
     async def refresh_errors():
         errors = await run.io_bound(system.get_errors)
@@ -774,6 +825,8 @@ def build():
             render_errors.refresh()
             render_units.refresh()
             render_verdict.refresh()
+            stamp_errors.refresh()
+            stamp_units.refresh()
 
     async def refresh_all():
         await refresh_errors()
@@ -838,16 +891,16 @@ def build():
 
         render_verdict()
 
-        _section_label('ERRORS — LAST 24 HOURS', top='24px')
+        _section_label('ERRORS — LAST 24 HOURS', top='24px', stamp=stamp_errors)
         render_errors()
 
-        _section_label('UNITS')
+        _section_label('UNITS', stamp=stamp_units)
         render_units()
 
-        _section_label('STACK HEALTH')
+        _section_label('STACK HEALTH', stamp=stamp_containers)
         render_containers()
 
-        _section_label('RESOURCES')
+        _section_label('RESOURCES', stamp=stamp_resources)
         render_resources()
 
         with ui.row().classes('items-center no-wrap').style('margin:28px 0 12px;gap:10px'):
@@ -864,3 +917,11 @@ def build():
     ui.timer(15.0, refresh_status)
     ui.timer(15.0, refresh_resources)
     ui.timer(30.0, refresh_errors)
+
+    def tick_stamps():
+        if not client_alive():
+            return
+        for stamp in (stamp_errors, stamp_units, stamp_containers, stamp_resources):
+            stamp.refresh()
+
+    ui.timer(5.0, tick_stamps)

@@ -124,7 +124,7 @@ _NOW = time.time()
 
 _HEALTHY_STATUS = {'defcon': [], 'containers': [{'Names': 'plex', 'Status': 'Up 2 hours'}],
                    'disk': {'total': 100, 'used': 40, 'free': 60, 'free_pct': 60.0},
-                   'memory': {'plex': '1GiB'}, 'daemon_active': True}
+                   'memory': {'plex': '1GiB'}, 'daemon_active': True, 'read_at': _NOW}
 
 
 def _errors(entries, ok=True, error=None):
@@ -133,7 +133,7 @@ def _errors(entries, ok=True, error=None):
 
 
 _HEALTHY_RESOURCES = {
-    'ok': True, 'error': None,
+    'ok': True, 'error': None, 'read_at': _NOW,
     'cpu': {'ok': True, 'error': None, 'cores': 8, 'load': [1.2, 1.0, 0.9],
             'psi': {'ok': True, 'error': None, 'some_avg10': 0.4}},
     'memory': {'ok': True, 'error': None, 'total': 16 * 1024**3, 'available': 8 * 1024**3,
@@ -150,7 +150,8 @@ _HEALTHY_RESOURCES = {
 def _stub_page(monkeypatch, *, errors, units=None, status=None, resources=None):
     monkeypatch.setattr(system_service, 'get_errors', lambda *a, **kw: errors)
     monkeypatch.setattr(system_service, 'get_units',
-                        lambda *a, **kw: units or {'ok': True, 'units': [], 'error': None})
+                        lambda *a, **kw: units or {'ok': True, 'units': [], 'error': None,
+                                                   'read_at': _NOW})
     monkeypatch.setattr(system_service, 'get_status', lambda *a, **kw: status or _HEALTHY_STATUS)
     monkeypatch.setattr(system_service, 'get_logs', lambda *a, **kw: [])
     # Keep the page off the real machine: without this the resource panel reads this
@@ -448,3 +449,65 @@ def test_psi_reports_unreadable_rather_than_zero(monkeypatch):
     psi = system_service._psi('/proc/pressure/memory')
     assert psi['ok'] is False and 'nope' in psi['error']
     assert 'some_avg10' not in psi
+
+
+# ---------- F6: freshness ----------
+
+def test_every_reader_stamps_when_it_actually_read(monkeypatch):
+    """A panel that cannot say when it was read cannot be trusted to be current."""
+    monkeypatch.setattr(system_service, '_run', lambda *a, **kw: (True, '[]'))
+    before = time.time()
+    units = system_service.get_units()
+    resources = system_service.get_host_resources()
+    after = time.time()
+
+    for name, data in (('units', units), ('resources', resources)):
+        assert 'read_at' in data, f'{name} reports no read time'
+        assert before <= data['read_at'] <= after
+
+
+def test_a_cache_hit_reports_when_the_data_was_read_not_when_it_was_served(monkeypatch):
+    """get_status() is cached for 8s. If a cache hit restamped itself, the page would
+    claim data was read just now when it is up to eight seconds old -- the stamp would
+    launder staleness instead of exposing it, which is the whole point of having one."""
+    read_at = time.time() - 5
+    cached = {'defcon': [], 'containers': [], 'disk': {}, 'memory': {},
+              'containers_error': None, 'read_at': read_at}
+    monkeypatch.setattr(system_service, '_status_cache',
+                        {'time': read_at, 'status': cached})
+
+    served = system_service.get_status()
+
+    assert served is cached
+    assert served['read_at'] == read_at
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_each_panel_shows_when_it_was_read(user: User, monkeypatch):
+    _stub_page(monkeypatch, errors=_errors([]))
+    await user.open('/lab-health-test')
+    await user.should_see('Nothing is broken')
+    # One stamp per panel -- errors, units, containers, resources -- plus the verdict.
+    stamp = time.strftime('%H:%M:%S', time.localtime(_NOW))
+    await user.should_see(f'AS OF {stamp}')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_an_old_reading_is_shown_as_stale_rather_than_as_current(user: User, monkeypatch):
+    """The failure this guards: the poll dies, the numbers freeze, and the page keeps
+    presenting them as the current state of the lab. Age is reported, not hidden."""
+    old = time.time() - 600
+    stale_resources = dict(_HEALTHY_RESOURCES, read_at=old)
+    _stub_page(monkeypatch, errors=_errors([]), resources=stale_resources)
+    await user.open('/lab-health-test')
+    await user.should_see('Nothing is broken')
+    await user.should_see('10m ago')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_reader_with_no_read_time_says_so_instead_of_looking_fresh(user: User, monkeypatch):
+    no_stamp = dict(_HEALTHY_RESOURCES)
+    no_stamp.pop('read_at')
+    _stub_page(monkeypatch, errors=_errors([]), resources=no_stamp)
+    await user.open('/lab-health-test')
+    await user.should_see('AS OF UNKNOWN')
