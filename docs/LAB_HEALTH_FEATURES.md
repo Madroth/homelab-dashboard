@@ -109,11 +109,13 @@ and a journal tail scoped to that unit.
 
 ---
 
-# P1 — Make it trustworthy
+# P1 — Make it trustworthy — **DONE 2026-08-29**
 
 Without these the spine is worse than nothing, because it will confidently show green.
 
 ### F5 · Fail closed, visibly, everywhere
+
+> **Done.** Every reader in `services/system.py` returns `{'ok', ..., 'error'}` and the page has a dashed "cannot tell" face distinct from healthy and broken.
 Every panel needs three outcomes, not two: **fine / broken / could not determine**, with
 "could not determine" visually distinct at a glance. Never render a plausible number from a
 fallback source. There is precedent: the System page read the root SSD's free space as the
@@ -121,14 +123,20 @@ NAS for three days. `services/system.py` already returns `{'error': ...}` instea
 number for the disk — extend that shape to every reader.
 
 ### F6 · "As of" and refresh
+
+> **Done `d9f5567`.** Every panel stamps its read time; `get_status()` stamps before its 8s cache stores it, so a cache hit reports when the data was read rather than when it was served. The stamps tick on their own 5s timer, so a poll that has died ages into amber instead of freezing at the last good reading. A reader with no read time says AS OF UNKNOWN.
 Every panel states when its data was read, and a manual refresh exists. Polling with a stale
 timestamp silently showing minute-old state is how a dashboard lies.
 
 ### F7 · Search and filter across everything
+
+> **Done.** One box across containers, units and errors. It may hide rows but never make the lab look healthier: the verdict stays global, a filtered page carries an amber banner, each section reports "showing N of M", and no-matches is explicit rather than an empty calm.
 One box: container name, unit name, error text, image, port. With 54 containers and 85 units,
 scrolling is not navigation.
 
 ### F8 · Deep links out
+
+> **Done `ba101fa`.** Uptime Kuma, Dozzle and ntfy in the header; Dozzle per container.
 Dozzle for a container's logs, Uptime Kuma, ntfy, and the compose project's directory. The
 dashboard should not reimplement a log viewer that already runs at `:8888`.
 

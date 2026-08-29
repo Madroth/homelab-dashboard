@@ -45,14 +45,12 @@ you design the "cannot tell" face before the healthy one.** Same reasoning behin
 
 ## What to do next
 
-1. **Lab Health P1** — freshness stamps ("as of" per panel) and search/filter across everything.
-   With 54 containers and 101 units, scrolling is not navigation. Nothing blocks this.
-2. **Lab Health P2** — the correlation window ("what else happened around this time") and the
+1. **Lab Health P2** — the correlation window ("what else happened around this time") and the
    bounded in-process ring buffer (~60 samples, dropped on restart) so a panel can say
    "40% → 88% over five minutes". **Not** a time-series store; see the anti-goals below.
-3. **`reclassify()` and the Rejected folder have no tests.** `test_media_fixes.py` covers undo
+2. **`reclassify()` and the Rejected folder have no tests.** `test_media_fixes.py` covers undo
    and the failure-surfacing paths; those two are the remaining gaps.
-4. **Give `services/media.py` a defined boundary** — it imports media-curator's internals over
+3. **Give `services/media.py` a defined boundary** — it imports media-curator's internals over
    `sys.path.append` with no package boundary and no version pin, which is what made this week's
    `undo()` data-integrity bug possible. The dashboard-side fix — name the surface this app needs
    and depend on that, so a refactor over there fails loudly — is doable from this repo alone.

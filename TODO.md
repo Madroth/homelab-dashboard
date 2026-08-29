@@ -124,9 +124,17 @@
         memory, disks and temperature, each clickable, with kernel pressure (PSI) on CPU and
         memory and swap exhaustion leading the memory card. Every card has a "cannot tell"
         face. Suite 100 green.
-  - [ ] Next from `LAB_HEALTH_FEATURES.md`: P1 (freshness stamps, search/filter across
-        everything) and P2 (correlation window, the bounded ring buffer for short-window
-        rates). Nothing blocks either.
+  - [x] **P1 done `d9f5567` + this commit.** F6: every panel stamps when it was read,
+        `get_status()` stamps before its cache stores it so a cache hit cannot restamp,
+        and the stamps age on their own 5s timer so a dead poll shows amber instead of
+        freezing at the last good reading. F5 was already in place. F7: one box filters
+        errors, units and containers, and cannot make the lab look healthier than it is —
+        global verdict, an amber "you are looking at a slice" banner, "showing N of M",
+        and an explicit no-matches state. Suite 100 → 110.
+  - [ ] Next from `LAB_HEALTH_FEATURES.md`: P2 — the correlation window ("what else
+        happened around this time") and the bounded in-process ring buffer (~60 samples,
+        dropped on restart) so a detail panel can say "40% → 88% over five minutes".
+        Nothing blocks it. Not a time-series store; the ring buffer is the ceiling.
 
 - [ ] **Send to HomeLab — hardening (2026-08-18)** — full plan and findings live in
   `homelab-intake/TODO.md` ("Send to HomeLab + its support systems"); this is the
