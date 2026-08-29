@@ -142,18 +142,22 @@ dashboard should not reimplement a log viewer that already runs at `:8888`.
 
 ---
 
-# P2 — Investigation quality
+# P2 — Investigation quality — **DONE 2026-08-29**
 
 ### F9 · Copyable everything
 Error text, container ids, unit names, and the suggested command — one click to clipboard.
 This is the difference between a status page and an investigation tool.
 
 ### F10 · Correlation window
+
+> **Done.** Neighbouring errors within ±5m sorted by proximity, plus the resource range the ring buffer retained. A collapsed run of repeats widens the window to cover the whole run. Both halves state their limits; for most historical errors the buffer holds nothing, and it says so rather than implying the machine was calm.
 On any error detail: "what else happened around this time" — other errors, container
 restarts, resource spikes in the same few minutes. The CIFS flap is the case in point: the
 NAS timing out and media containers stalling are the same event seen twice.
 
 ### F11 · Short-window rates, without a database
+
+> **Done.** 60 samples, in-process, dropped on restart. Sampling is demand-driven, so the trend reports the span it actually covers, collapses simultaneous multi-tab reads into one reading, and refuses a direction below 3 readings or 60s of span. A failed sub-reader enters as None, never a plausible zero.
 A bounded in-process ring buffer (say 60 samples, ~5 minutes) so a detail panel can say
 "memory 40% → 88% over five minutes" instead of only "88%". **Nothing persisted, nothing
 queried, dropped on restart** — this is a live reading with a short memory, not a TSDB, and

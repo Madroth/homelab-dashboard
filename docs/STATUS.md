@@ -15,7 +15,13 @@ just "where things stand and what to do next".
 (`test_toggle_select_timing_with_large_queue`) was rewritten to assert work done instead of
 wall-clock and now runs green repeatedly.
 
-**Lab Health page — P0 complete.** The old System Status tab was absorbed into
+**Lab Health page — P0, P1 and P2 complete.** P1 gave every panel an "as of" stamp that
+ages into amber on its own timer, and one filter box across errors, units and containers
+that cannot make the lab look healthier than it is. P2 added a 60-sample in-process ring
+buffer (dropped on restart, never persisted, never alerted on) and the correlation window
+on an error detail. Both refuse to answer rather than guess when the readings are thin.
+
+**Originally, P0:** The old System Status tab was absorbed into
 `pages/lab_health.py` (tab key is still `system`, so `?tab=system` links and the `ai_context`
 registration keep working). It has:
 
@@ -45,9 +51,9 @@ you design the "cannot tell" face before the healthy one.** Same reasoning behin
 
 ## What to do next
 
-1. **Lab Health P2** — the correlation window ("what else happened around this time") and the
-   bounded in-process ring buffer (~60 samples, dropped on restart) so a panel can say
-   "40% → 88% over five minutes". **Not** a time-series store; see the anti-goals below.
+1. **Lab Health P3** — SMART (F13), network and reachability (F14), backups (F15), remote
+   hosts (F16). Also the two P1 leftovers annotated in `TODO.md`: host uptime and Tailscale
+   reachability, and rolling per-container health up to a service-level verdict.
 2. **`reclassify()` and the Rejected folder have no tests.** `test_media_fixes.py` covers undo
    and the failure-surfacing paths; those two are the remaining gaps.
 3. **Give `services/media.py` a defined boundary** — it imports media-curator's internals over

@@ -131,10 +131,17 @@
         errors, units and containers, and cannot make the lab look healthier than it is —
         global verdict, an amber "you are looking at a slice" banner, "showing N of M",
         and an explicit no-matches state. Suite 100 → 110.
-  - [ ] Next from `LAB_HEALTH_FEATURES.md`: P2 — the correlation window ("what else
-        happened around this time") and the bounded in-process ring buffer (~60 samples,
-        dropped on restart) so a detail panel can say "40% → 88% over five minutes".
-        Nothing blocks it. Not a time-series store; the ring buffer is the ceiling.
+  - [x] **P2 done.** F11: a 60-sample in-process ring buffer, dropped on restart, never
+        persisted and never alerted on. Sampling is demand-driven, so the trend reports
+        the span it actually covers rather than a nominal five minutes, collapses
+        simultaneous reads from several tabs into one reading, and refuses a direction
+        below three readings or 60s of span. F10: an error detail now shows neighbouring
+        errors within ±5m sorted by proximity, plus the resource range retained around
+        then — and says "nothing was retained" rather than implying calm. Suite 110 → 124.
+  - [ ] Next from `LAB_HEALTH_FEATURES.md`: P3 — SMART (F13), network and reachability
+        (F14, at the service layer, never a ping), backups (F15, QNAP2 never probed) and
+        remote hosts (F16, with an explicit "last reviewed" since this box cannot
+        enumerate them). P4 stays parked on registry-driven work.
 
 - [ ] **Send to HomeLab — hardening (2026-08-18)** — full plan and findings live in
   `homelab-intake/TODO.md` ("Send to HomeLab + its support systems"); this is the
