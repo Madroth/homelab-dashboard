@@ -36,15 +36,6 @@
     and Retry moved one click further in. (Noted 2026-08-04 while triaging the
     Omega-unreachable failures.)
 
-- [ ] **Media Stack (Frontend & GUI Config)**
-  - [ ] Connect Prowlarr indexers to Radarr & Sonarr.
-  - [ ] Link Radarr & Sonarr to qBittorrent via API keys.
-  - [ ] Claim Plex server and configure library folders (`/data/media`).
-  - [ ] Setup Discord/Telegram Webhook alerts inside Uptime Kuma.
-    (Note: Uptime Kuma is no longer part of the media stack — see the
-    monitoring item below. Its alerting is now gated on homelab-monitoring's
-    M1, which standardises on self-hosted ntfy rather than Discord/Telegram.)
-
 - [ ] **Monitoring / lab health home on the dashboard (2026-08-22)** — one place to see
   whether the lab is healthy, rather than the pieces scattered across pages. Merged from
   two notes written the same day: Chris's ask for a single health/status/usage/alerts/errors
@@ -74,9 +65,6 @@
   - [ ] Resource usage: host CPU / RAM / temps and per-container stats. `docker stats` is
         only read for Plex today, and nothing is kept over time — no trend, so a slow leak
         or a filling disk is invisible until it trips a DEFCON threshold.
-  - [ ] Notifications: somewhere alerts actually land and can be acknowledged. The DEFCON
-        banner only shows while you happen to be on the page, and Kuma's alerting is gated
-        on homelab-monitoring's M1 (self-hosted ntfy, not Discord/Telegram).
   - [ ] Error reporting: a real surface for failures with the full text readable and
         copyable — this is the general form of the intake failed-queue complaint above,
         where the error survives only as a hover tooltip.
@@ -179,8 +167,12 @@
         reaching the user rather than arriving as nothing — plus the 4 undo tests on the
         service side. `test_media_fixes.py` is at 12.
   - [ ] Still thin: nothing covers `reclassify()` or the Rejected folder.
-  - [ ] Decide whether this stays an import-the-internals arrangement or gets a real boundary.
-        Recorded as tech debt in media-curator's EPICS Epic 7; nobody owns it yet.
+  - [ ] **Dashboard side of the boundary:** name what this app actually needs from
+        media-curator (approve, reject, reclassify, identify, the drop zone) and depend on
+        that surface instead of reaching past `sys.path` into its internals — so a refactor
+        over there fails loudly here. Doable from this repo alone against today's imports;
+        it does not wait on media-curator publishing anything. Whether *they* expose a real
+        package is theirs (their Epic 7, unowned) and is not tracked here.
 
 - [x] **Fixed `a329de8` — `test_toggle_select_timing_with_large_queue` was flaky (2026-08-22)** — it asserts a
   wall-clock budget (`< 0.5s`) and fails intermittently on a loaded machine. Measured on clean
@@ -190,3 +182,31 @@
   measure work done rather than seconds elapsed. **Took the third option:** it is now
   `test_toggle_select_rebuilds_one_row_not_the_whole_queue`, asserting via element identity
   that the toggled row was rebuilt and the other 79 were not. Five consecutive green runs.
+
+---
+
+## Not this project (pruned 2026-08-29)
+
+Chris's call: this backlog tracks the dashboard only. Work on the services the dashboard
+*looks at* belongs to the project that owns them. Recorded here so it is handed over rather
+than dropped — none of it is tracked in this repo any more.
+
+**→ `media-curator`** (its stack, its configuration; nothing below touches dashboard code)
+- Connect Prowlarr indexers to Radarr & Sonarr.
+- Link Radarr & Sonarr to qBittorrent via API keys.
+- Claim the Plex server and configure library folders (`/data/media`).
+- Whether media-curator exposes a real package/API instead of importable internals — its
+  Epic 7, unowned. The dashboard-side half of that boundary *is* still tracked above.
+
+**→ `homelab-monitoring`** (it owns detection and alerting; Kuma and ntfy moved there at
+HomeLab BUILD_BACKLOG Phase 0.7)
+- Uptime Kuma alert configuration. The old note said Discord/Telegram webhooks; M1
+  standardises on self-hosted ntfy, so that item was stale as well as misplaced.
+- Somewhere alerts land and can be acknowledged. This one was not just misfiled, it was
+  against the rule: **the dashboard informs and investigates, it does not detect or alert.**
+  A page you have to be looking at is not a detector. Alert delivery is ntfy's, and M1
+  (subscribe a phone to `homelab-alerts`) is Chris's.
+
+What stays here: rendering Kuma/Dozzle/ntfy quick-links, showing media-curator's queue on the
+Media Curator page, and everything in `docs/LAB_HEALTH_FEATURES.md` — including P4, whose
+screens are this dashboard's even though they wait on homelab-monitoring for check output.

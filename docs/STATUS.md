@@ -1,7 +1,8 @@
 # Project status — resume point
 
-**Last updated:** 2026-08-23 · **HEAD:** `877db37` · working tree clean, everything pushed to
-`origin/main` · service `homelab-dashboard.service` **active** on :8085, running this code.
+**Last updated:** 2026-08-29 · **HEAD:** `08b8ee3` plus this backlog prune · service
+`homelab-dashboard.service` **active** on :8085, running that code. Not yet pushed — pushing to
+`Madroth/homelab-dashboard` needs Chris's sign-off each time (ADR 7, Tier 2).
 
 Read this first when picking the project back up. `TODO.md` is the full backlog;
 `docs/LAB_HEALTH_FEATURES.md` is the prioritized plan for the monitoring page. This file is
@@ -51,10 +52,19 @@ you design the "cannot tell" face before the healthy one.** Same reasoning behin
    "40% → 88% over five minutes". **Not** a time-series store; see the anti-goals below.
 3. **`reclassify()` and the Rejected folder have no tests.** `test_media_fixes.py` covers undo
    and the failure-surfacing paths; those two are the remaining gaps.
-4. **Decide the media-curator boundary** (yours, not a task) — `services/media.py` imports that
-   repo's internals over `sys.path.append` with no package boundary and no version pin. That is
-   what made this week's `undo()` data-integrity bug possible. Recorded as tech debt in
-   media-curator's Epic 7; nobody owns it.
+4. **Give `services/media.py` a defined boundary** — it imports media-curator's internals over
+   `sys.path.append` with no package boundary and no version pin, which is what made this week's
+   `undo()` data-integrity bug possible. The dashboard-side fix — name the surface this app needs
+   and depend on that, so a refactor over there fails loudly — is doable from this repo alone.
+   Whether media-curator publishes a real package is *their* Epic 7 and is not tracked here.
+
+## Scope — this repo tracks the dashboard only
+
+Decided 2026-08-29. Configuring the services the dashboard *looks at* is the owning project's
+work: media stack setup (Prowlarr/Radarr/Sonarr/qBittorrent/Plex) is `media-curator`'s, and
+Uptime Kuma alert configuration and alert delivery are `homelab-monitoring`'s. `TODO.md` has a
+"Not this project" section recording what was pruned and where it went. Rendering links to those
+services, and showing their state on Lab Health, is dashboard work and stays.
 
 ## Hard constraints — do not relitigate
 
