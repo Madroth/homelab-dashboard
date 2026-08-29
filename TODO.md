@@ -53,21 +53,32 @@
   media-curator inactive), `docker ps` container cards, `/mnt/Multimedia` disk usage, Plex's
   memory line, and `get_logs()` for a log tail. Decide whether that page becomes this home
   or sits beside it.
-  - [ ] Give monitoring its own section or page (Uptime Kuma `:3001` +
-        Dozzle `:8888`) rather than borrowing another project's page.
-  - [ ] Once it exists, decide whether the Media Curator quick-link stays as a
-        convenience or moves. Deliberately left working in the meantime —
-        removing it would have cost a shortcut and returned nothing.
-  - [ ] Lab health at a glance: one honest up/degraded/down verdict per service, not just
-        a container's own `Status` string — a running container is not a working service.
-  - [ ] System status beyond the media stack: host uptime, load, the other systemd units,
-        Tailscale reachability (Omega at `100.74.2.92`, the bridge service), NAS mount.
-  - [ ] Resource usage: host CPU / RAM / temps and per-container stats. `docker stats` is
-        only read for Plex today, and nothing is kept over time — no trend, so a slow leak
-        or a filling disk is invisible until it trips a DEFCON threshold.
-  - [ ] Error reporting: a real surface for failures with the full text readable and
-        copyable — this is the general form of the intake failed-queue complaint above,
-        where the error survives only as a hover tooltip.
+  This was the original wishlist, written before P0 existed. Reconciled against the code
+  2026-08-29 — four of the six are delivered; the two that are not say what is missing.
+  - [x] **Done `ba101fa`.** Monitoring has its own page rather than borrowing another
+        project's: `pages/lab_health.py`, linking Uptime Kuma `:3001`, Dozzle `:8888` and
+        ntfy `:5001` (`pages/lab_health.py:24-26`).
+  - [x] **Decided and done `ba101fa`.** The Media Curator quick-link moved rather than
+        staying — Chris's call 2026-08-22; Kuma is not a media service. `pages/media.py`
+        no longer mentions it.
+  - [ ] Lab health at a glance: one honest up/degraded/down verdict **per service**, not
+        just a container's own `Status` string — a running container is not a working
+        service. *Partly there: container detail reads `.State.Health.Status`
+        (`services/system.py:527`), which is the honest per-container verdict. What is
+        missing is rolling that up to a service-level judgement in the list itself, and
+        containers with no healthcheck defined still have nothing better than their status
+        string.*
+  - [ ] System status beyond the media stack. *Delivered: the other systemd units (`get_units`),
+        load (`get_host_resources`), the NAS mount and disks. Still missing: **host uptime**,
+        and **Tailscale reachability** (Omega at `100.74.2.92`, the bridge service) — the
+        latter is P3 F14 in `LAB_HEALTH_FEATURES.md`, at the service layer, never a ping.*
+  - [x] **Done `2bf4b9c`.** Resource usage: host CPU, memory, disks and temperature with
+        kernel pressure, plus per-container `docker stats` fetched on drill-down rather
+        than only for Plex. Nothing is retained — the bounded ring buffer in P2 is the
+        ceiling and is still to come.
+  - [x] **Done `ba101fa`.** Error reporting: journald errors from both managers, failed
+        units and non-zero container exits, merged and collapsed by repeat, with the full
+        text selectable and copyable. Subsumed the intake failed-queue complaint above.
 
   **Sequencing decided 2026-08-22 (Chris). Most of this waits for the monitors.** The
   design work is done and parked: `docs/MONITORING_BRIEF.md` (24 features in four tiers,

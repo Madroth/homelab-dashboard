@@ -106,6 +106,8 @@ None of this is a dashboard bug — it is what the dashboard is now showing:
 - The **NAS flapped** on 2026-08-22 afternoon — repeated `CIFS: VFS: ... has not responded in 180
   seconds` while the mountpoint check kept passing. Quiet since. This is exactly the class of
   failure the error stream exists to surface.
-- **ntfy publishes but nothing is subscribed** (`subscribed_by` is empty), so no alert reaches a
-  phone. That is `homelab-monitoring`'s M1 and it is Chris's to do — until it is done, every
-  failure stays silent no matter how good this page gets.
+- **ntfy now reaches a phone** — Chris confirmed the subscription to `homelab-alerts` on
+  2026-08-29, closing `homelab-monitoring`'s M1. (Superseded the long-standing note here that
+  `subscribed_by` was empty and every failure stayed silent.) Detection has somewhere to land
+  at last, which is what lets this page stay an investigation surface rather than drifting
+  into alerting.
