@@ -511,3 +511,92 @@ async def test_a_reader_with_no_read_time_says_so_instead_of_looking_fresh(user:
     _stub_page(monkeypatch, errors=_errors([]), resources=no_stamp)
     await user.open('/lab-health-test')
     await user.should_see('AS OF UNKNOWN')
+
+
+# ---------- F7: search and filter ----------
+
+_MANY_CONTAINERS = {
+    'defcon': [], 'disk': {'total': 100, 'used': 40, 'free': 60, 'free_pct': 60.0},
+    'memory': {}, 'daemon_active': True, 'read_at': _NOW, 'containers_error': None,
+    'containers': [
+        {'Names': 'plex', 'Status': 'Up 2 hours', 'Image': 'plexinc/pms-docker',
+         'Labels': 'com.docker.compose.project=media'},
+        {'Names': 'sonarr', 'Status': 'Up 3 days', 'Image': 'linuxserver/sonarr',
+         'Labels': 'com.docker.compose.project=media'},
+        {'Names': 'plane-api', 'Status': 'Up 1 day', 'Image': 'makeplane/plane',
+         'Labels': 'com.docker.compose.project=plane-app'},
+    ],
+}
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_filtering_narrows_containers_to_the_match(user: User, monkeypatch):
+    _stub_page(monkeypatch, errors=_errors([]), status=_MANY_CONTAINERS)
+    await user.open('/lab-health-test')
+    await user.should_see('sonarr')
+
+    user.find(marker='lab-health-search').type('plane')
+    await user.should_see('plane-api')
+    await user.should_not_see('sonarr')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_filtered_page_says_it_is_filtered(user: User, monkeypatch):
+    """A narrowed list must never read as the whole truth."""
+    _stub_page(monkeypatch, errors=_errors([]), status=_MANY_CONTAINERS)
+    await user.open('/lab-health-test')
+    user.find(marker='lab-health-search').type('plex')
+    await user.should_see('Filtered by "plex"')
+    await user.should_see('showing 1 of 3')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_filter_matching_nothing_says_so_rather_than_looking_calm(user: User, monkeypatch):
+    """An empty panel and a panel with nothing wrong look identical. They must not."""
+    _stub_page(monkeypatch, errors=_errors([]), status=_MANY_CONTAINERS)
+    await user.open('/lab-health-test')
+    user.find(marker='lab-health-search').type('nosuchcontainer')
+    await user.should_see('No containers match')
+    await user.should_not_see('Docker is reachable and reports no containers')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_filtering_never_downgrades_the_verdict(user: User, monkeypatch):
+    """The load-bearing one. Filtering hides rows; it must not make a broken lab
+    report as a quiet one. The verdict is about the whole lab, not the slice on screen."""
+    _stub_page(monkeypatch, status=_MANY_CONTAINERS, errors=_errors([
+        {'source': 'unit', 'origin': 'plane-backup.service', 'at': _NOW, 'count': 1,
+         'first_at': _NOW, 'severity': 'critical',
+         'message': 'plane-backup.service is in a failed state (failed)',
+         'detail': {'manager': 'user', 'unit': 'plane-backup.service'}},
+    ]))
+    await user.open('/lab-health-test')
+    await user.should_see('Something is broken')
+
+    # Filter to something that matches no error at all.
+    user.find(marker='lab-health-search').type('plex')
+    await user.should_see('No errors match')
+    await user.should_see('Something is broken')      # still true, still said
+    await user.should_not_see('Nothing is broken')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_searching_finds_a_healthy_unit_the_summary_view_would_cap_away(
+        user: User, monkeypatch):
+    """Unfiltered, units show failures first and then only 14 of the rest. Searching
+    for one by name has to find it regardless of where it fell in that cap."""
+    units = {'ok': True, 'error': None, 'read_at': _NOW, 'units': [
+        {'unit': f'filler-{i}.service', 'kind': 'service', 'manager': 'user',
+         'description': 'filler', 'active': 'active', 'sub': 'running', 'failed': False}
+        for i in range(30)
+    ] + [
+        {'unit': 'homelab-dashboard.service', 'kind': 'service', 'manager': 'user',
+         'description': 'Homelab Dashboard', 'active': 'active', 'sub': 'running',
+         'failed': False},
+    ]}
+    _stub_page(monkeypatch, errors=_errors([]), units=units)
+    await user.open('/lab-health-test')
+    await user.should_not_see('homelab-dashboard.service')   # capped away at 14
+
+    user.find(marker='lab-health-search').type('homelab-dashboard')
+    await user.should_see('homelab-dashboard.service')

@@ -67,7 +67,7 @@ def _clock(ts: float) -> str:
 
 def build():
     state = {'status': None, 'logs': [], 'errors': None, 'units': None,
-             'status_error': None, 'resources': None}
+             'status_error': None, 'resources': None, 'query': ''}
 
     # ---------- shared chrome ----------
 
@@ -124,6 +124,47 @@ def build():
     stamp_containers = _stamp_for(
         'status', 30.0, partial=lambda d: bool(d.get('containers_error')))
     stamp_resources = _stamp_for('resources', 30.0)
+
+    # F7. With 54 containers and 101 units, scrolling is not navigation.
+    #
+    # The rule this filter obeys: it may hide rows, but it may never make the lab look
+    # healthier than it is. So the verdict banner above stays global and unfiltered, every
+    # filtered section says how many of how many it is showing, and a section with no
+    # matches says "no matches" rather than rendering the same empty calm as "nothing is
+    # wrong here". A filter that quietly emptied a panel would be the NAS bug wearing a
+    # different hat.
+    def _q() -> str:
+        return state['query']
+
+    def _hit(query: str, *fields) -> bool:
+        return any(query in (f or '').lower() for f in fields)
+
+    def _match_error(entry: dict, query: str) -> bool:
+        return _hit(query, entry.get('message'), entry.get('origin'),
+                    entry.get('source'), entry.get('severity'))
+
+    def _match_unit(u: dict, query: str) -> bool:
+        return _hit(query, u.get('unit'), u.get('description'), u.get('active'), u.get('sub'))
+
+    def _match_container(c: dict, query: str) -> bool:
+        return _hit(query, c.get('Names'), c.get('Status'), c.get('Image'), _project_of(c))
+
+    def _filtered_note(shown: int, total: int):
+        """Says what the filter is hiding. Without this a narrowed list reads as the
+        whole truth."""
+        if not _q():
+            return
+        ui.label(f'showing {shown} of {total} — filtered by "{state["query"]}"').style(
+            f'font-size:10.5px;color:{theme.AMBER};margin-top:8px')
+
+    def _no_matches(what: str):
+        with ui.row().classes('items-center no-wrap').style(
+                f'gap:10px;padding:13px 15px;border-radius:9px;width:100%;'
+                f'background:{theme.CARD_BG};border:1px dashed rgba(147,153,178,0.5)'):
+            ui.icon('fa-solid fa-magnifying-glass').style(f'color:{theme.TEXT_DIM};font-size:13px')
+            ui.label(f'No {what} match "{state["query"]}". This hides rows; '
+                     f'it does not mean there are none.').style(
+                f'font-size:11.5px;color:{theme.TEXT_MUTED}')
 
     def _unknown_box(message: str):
         """The load-bearing visual: a dashed, muted panel that can never be mistaken
@@ -289,8 +330,15 @@ def build():
                         f'font-size:11.5px;color:{theme.TEXT_MUTED}')
             return
 
+        query = _q()
+        all_entries = errors['entries']
+        entries = [e for e in all_entries if _match_error(e, query)] if query else all_entries
+        if query and not entries:
+            _no_matches('errors')
+            return
+
         with ui.column().style('gap:6px;width:100%'):
-            for entry in errors['entries'][:40]:
+            for entry in entries[:40]:
                 color = SEVERITY_COLORS.get(entry['severity'], theme.TEXT_MUTED)
                 with ui.row().classes('items-center no-wrap cursor-pointer').style(
                         f'gap:12px;padding:10px 14px;border-radius:9px;width:100%;'
@@ -312,6 +360,7 @@ def build():
                             f'padding:2px 7px;border-radius:5px;flex:none')
                     ui.label(_ago(entry['at'])).style(
                         f'font-size:10.5px;color:{theme.TEXT_DIM};flex:none;width:70px;text-align:right')
+        _filtered_note(min(len(entries), 40), len(all_entries))
 
     # ---------- units ----------
 
@@ -385,8 +434,19 @@ def build():
             if not units['units']:
                 return
 
-        failed = [u for u in units['units'] if u['failed']]
-        shown = failed + [u for u in units['units'] if not u['failed']][:14]
+        query = _q()
+        all_units = units['units']
+        if query:
+            matches = [u for u in all_units if _match_unit(u, query)]
+            if not matches:
+                _no_matches('units')
+                return
+            # Searching for a unit means wanting to see it, healthy or not -- so the
+            # "failed first, then 14 of the rest" summary gives way to the matches.
+            shown = sorted(matches, key=lambda u: (not u['failed'], u['unit']))[:40]
+        else:
+            failed = [u for u in all_units if u['failed']]
+            shown = failed + [u for u in all_units if not u['failed']][:14]
         with ui.column().style('gap:6px;width:100%'):
             for u in shown:
                 color = theme.RED if u['failed'] else (
@@ -407,8 +467,10 @@ def build():
                         f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap')
                     ui.label(f"{u['active']}/{u['sub']}").style(
                         f'font-size:10.5px;color:{color};flex:none;width:120px;text-align:right')
-        if len(units['units']) > len(shown):
-            ui.label(f"{len(units['units']) - len(shown)} more units not shown").style(
+        if query:
+            _filtered_note(len(shown), len(all_units))
+        elif len(all_units) > len(shown):
+            ui.label(f'{len(all_units) - len(shown)} more units not shown').style(
                 f'font-size:10.5px;color:{theme.TEXT_DIM};margin-top:8px')
 
     # ---------- containers, metrics, logs (carried over from System Status) ----------
@@ -536,8 +598,17 @@ def build():
                 ui.label('Docker is reachable and reports no containers.').style(
                     f'font-size:11.5px;color:{theme.TEXT_MUTED}')
             return
+        query = _q()
+        all_containers = containers
+        if query:
+            containers = [c for c in containers if _match_container(c, query)]
+            if not containers:
+                _no_matches('containers')
+                return
+
         # Grouped by compose project: the media stack is 11 of 54 containers across 13
-        # projects, so one flat grid buries everything else under it.
+        # projects, so one flat grid buries everything else under it. A group whose
+        # members all filtered out drops away rather than rendering as an empty stack.
         groups: dict[str, list] = {}
         for c in containers:
             groups.setdefault(_project_of(c), []).append(c)
@@ -576,6 +647,7 @@ def build():
                                 ui.label(c.get('Status', '')).style(
                                     f'font-size:10.5px;color:{theme.TEXT_MUTED};overflow:hidden;'
                                     f'text-overflow:ellipsis;white-space:nowrap;max-width:100%')
+        _filtered_note(len(containers), len(all_containers))
 
     def _human(n):
         if n is None:
@@ -786,6 +858,28 @@ def build():
         ui.markdown('```\n' + ''.join(logs) + '\n```').classes('nq-markdown').style(
             'max-height:280px;overflow:auto;width:100%')
 
+    # A filter narrows three panels at once, and the verdict above them stays global.
+    # Saying so out loud is the difference between "the lab is quiet" and "you are
+    # looking at a slice of it".
+    @ui.refreshable
+    def render_filter_banner():
+        if not _q():
+            return
+        with ui.row().classes('items-center no-wrap w-full').style(
+                f'gap:10px;padding:10px 14px;border-radius:9px;margin-bottom:12px;'
+                f'background:rgba(249,201,124,0.10);border:1px solid {theme.AMBER}'):
+            ui.icon('fa-solid fa-filter').style(f'color:{theme.AMBER};font-size:12px')
+            ui.label(f'Filtered by "{state["query"]}" — errors, units and containers below '
+                     f'show only what matches. The verdict above is for the whole lab.').style(
+                f'font-size:11.5px;color:{theme.TEXT_MUTED}')
+
+    def apply_query(value):
+        state['query'] = (value or '').strip().lower()
+        render_filter_banner.refresh()
+        render_errors.refresh()
+        render_units.refresh()
+        render_containers.refresh()
+
     # ---------- refreshers ----------
 
     async def refresh_status():
@@ -889,6 +983,15 @@ def build():
             ui.button(icon='refresh', on_click=refresh_all).props('flat dense').style(
                 f'color:{theme.TEXT_MUTED}').mark('lab-health-refresh')
 
+        with ui.row().classes('items-center no-wrap w-full').style('gap:10px;margin-bottom:14px'):
+            ui.input(placeholder='Filter containers, units and errors — name, image, port, '
+                                 'error text…',
+                     on_change=lambda e: apply_query(e.value)) \
+                .props('dense outlined clearable') \
+                .style(f'flex:1;min-width:0;font-size:12px') \
+                .mark('lab-health-search')
+
+        render_filter_banner()
         render_verdict()
 
         _section_label('ERRORS — LAST 24 HOURS', top='24px', stamp=stamp_errors)
