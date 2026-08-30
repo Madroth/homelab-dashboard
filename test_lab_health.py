@@ -147,7 +147,20 @@ _HEALTHY_RESOURCES = {
 }
 
 
-def _stub_page(monkeypatch, *, errors, units=None, status=None, resources=None):
+_HEALTHY_REACH = {
+    'ok': True, 'error': None, 'read_at': _NOW, 'down': [],
+    'tailscale': {'ok': True, 'error': None, 'backend': 'Running', 'self': 'linuxbox-GT70',
+                  'ips': ['100.87.245.107'],
+                  'peers': [{'host': 'Omega', 'online': True, 'os': 'windows',
+                             'last_seen': ''}]},
+    'mount': {'ok': True, 'path': '/mnt/Multimedia', 'mounted': True, 'responded': True,
+              'latency_ms': 7.0, 'error': None, 'slow': False},
+    'endpoints': [{'name': 'ntfy', 'url': 'http://ntfy/v1/health', 'ok': True,
+                   'reached': True, 'status': 200, 'latency_ms': 6.0, 'error': None}],
+}
+
+
+def _stub_page(monkeypatch, *, errors, units=None, status=None, resources=None, reach=None):
     monkeypatch.setattr(system_service, 'get_errors', lambda *a, **kw: errors)
     monkeypatch.setattr(system_service, 'get_units',
                         lambda *a, **kw: units or {'ok': True, 'units': [], 'error': None,
@@ -160,6 +173,13 @@ def _stub_page(monkeypatch, *, errors, units=None, status=None, resources=None):
                         lambda *a, **kw: resources or _HEALTHY_RESOURCES)
     monkeypatch.setattr(system_service, 'get_top_processes',
                         lambda *a, **kw: {'ok': True, 'error': None, 'processes': []})
+    # Same rule as the resource reader above, and more important here: without this the
+    # reachability panel would make real network probes during the test run.
+    monkeypatch.setattr(system_service, 'get_reachability',
+                        lambda *a, **kw: reach or _HEALTHY_REACH)
+    monkeypatch.setattr(system_service, 'get_uptime',
+                        lambda *a, **kw: {'ok': True, 'error': None, 'seconds': 486000.0,
+                                          'booted_at': _NOW - 486000.0})
 
 
 @pytest.mark.nicegui_main_file('test_lab_health.py')
@@ -797,3 +817,125 @@ async def test_error_detail_pairs_resource_readings_with_the_error_when_it_has_t
     user.find(marker=f'error-row-kernel-{int(now)}').click()
     await user.should_see('Memory used 41–93%')
     await user.should_see('3 samples')
+
+
+# ---------- F14: network & reachability ----------
+
+def test_a_mounted_share_that_does_not_answer_is_reported_down(monkeypatch):
+    """The 22 Aug failure exactly: os.path.ismount() kept passing for an afternoon while
+    the NAS logged 180-second timeouts. Being in the mount table is not being alive."""
+    monkeypatch.setattr(system_service.os.path, 'ismount', lambda p: True)
+    monkeypatch.setattr(system_service, '_run',
+                        lambda *a, **kw: (False, 'timed out after 5s'))
+    m = system_service.probe_mount('/mnt/Multimedia')
+    assert m['mounted'] is True         # the mount table still says yes
+    assert m['responded'] is False      # and it is still down
+    assert m['ok'] is False
+    assert 'did not answer' in m['error']
+
+
+def test_an_unmounted_share_is_distinguished_from_an_unresponsive_one(monkeypatch):
+    monkeypatch.setattr(system_service.os.path, 'ismount', lambda p: False)
+    m = system_service.probe_mount('/mnt/Multimedia')
+    assert m['mounted'] is False and m['responded'] is False
+    assert 'NOT MOUNTED' in m['error']
+
+
+def test_a_slow_share_is_flagged_before_it_becomes_a_dead_one(monkeypatch):
+    monkeypatch.setattr(system_service.os.path, 'ismount', lambda p: True)
+    monkeypatch.setattr(system_service, '_run',
+                        lambda *a, **kw: (time.sleep(1.05), (True, '100 50'))[1])
+    m = system_service.probe_mount('/mnt/Multimedia')
+    assert m['ok'] is True and m['slow'] is True
+
+
+def test_an_endpoint_that_answers_unhappily_is_not_the_same_as_unreachable(monkeypatch):
+    """A 500 proves the service is listening. Folding it in with 'did not answer' would
+    send you looking at the network when the problem is the service."""
+    class _Resp:
+        status_code = 503
+    monkeypatch.setattr('requests.get', lambda *a, **kw: _Resp())
+    e = system_service._probe_endpoint('thing', 'http://x/health')
+    assert e['reached'] is True and e['ok'] is False
+    assert e['status'] == 503
+
+
+def test_an_unreachable_endpoint_says_so_and_keeps_the_reason(monkeypatch):
+    def boom(*a, **kw):
+        raise OSError('connection refused')
+    monkeypatch.setattr('requests.get', boom)
+    e = system_service._probe_endpoint('thing', 'http://x/health')
+    assert e['reached'] is False and e['ok'] is False
+    assert e['status'] is None
+    assert 'connection refused' in e['error']
+
+
+def test_tailscale_lists_only_lab_peers_not_the_family_laptops(monkeypatch):
+    """The tailnet carries phones and family machines. A lab health page listing who is
+    online is a presence tracker, which is neither its job nor anybody's business."""
+    payload = {
+        'BackendState': 'Running',
+        'TailscaleIPs': ['100.87.245.107'],
+        'Self': {'HostName': 'linuxbox-GT70'},
+        'Peer': {
+            'a': {'HostName': 'Omega', 'Online': True, 'OS': 'windows'},
+            'b': {'HostName': 'JoanDell5300', 'Online': False, 'OS': 'windows'},
+            'c': {'HostName': 'Pixel 10 Pro XL', 'Online': True, 'OS': 'android'},
+            'd': {'HostName': 'steamdeck', 'Online': False, 'OS': 'linux'},
+        },
+    }
+    monkeypatch.setattr(system_service, '_run',
+                        lambda *a, **kw: (True, __import__('json').dumps(payload)))
+    ts = system_service.get_tailscale()
+    hosts = {p['host'] for p in ts['peers']}
+    assert hosts == {'Omega', 'steamdeck'}
+    assert ts['ok'] is True
+
+
+def test_tailscale_down_fails_closed_rather_than_reporting_an_empty_tailnet(monkeypatch):
+    monkeypatch.setattr(system_service, '_run',
+                        lambda *a, **kw: (False, 'tailscale: command not found'))
+    ts = system_service.get_tailscale()
+    assert ts['ok'] is False
+    assert 'not found' in ts['error']
+    assert ts['peers'] == []      # empty, but ok=False says why
+
+
+def test_qnap2_is_never_probed():
+    """ADR 22: the off-limits backup vault. The restic job is the only sanctioned thing
+    that talks to it, and nothing here may quietly become the second."""
+    blob = ' '.join(url for _, url in system_service._ENDPOINTS)
+    assert '192.168.1.171' not in blob
+    assert 'qnap2' not in blob.lower()
+    assert system_service.NAS_MOUNT == '/mnt/Multimedia'
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_dead_endpoint_cannot_sit_under_a_green_banner(user: User, monkeypatch):
+    """The load-bearing one. The page must never say 'Nothing is broken' directly above
+    a panel listing a service that did not answer."""
+    reach = dict(_HEALTHY_REACH, ok=False, down=['Omega — Ollama'], endpoints=[
+        {'name': 'Omega — Ollama', 'url': 'http://100.74.2.92:11434/api/tags',
+         'ok': False, 'reached': False, 'status': None, 'latency_ms': 4000.0,
+         'error': 'ConnectTimeout: timed out'},
+    ])
+    _stub_page(monkeypatch, errors=_errors([]), reach=reach)
+    await user.open('/lab-health-test')
+    await user.should_see('Something is broken')
+    await user.should_see('not reachable: Omega — Ollama')
+    await user.should_see('did not answer')
+    await user.should_not_see('Nothing is broken')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_all_clear_requires_reachability_to_have_answered(user: User, monkeypatch):
+    _stub_page(monkeypatch, errors=_errors([]))
+    await user.open('/lab-health-test')
+    await user.should_see('every endpoint answered')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_the_page_shows_host_uptime(user: User, monkeypatch):
+    _stub_page(monkeypatch, errors=_errors([]))
+    await user.open('/lab-health-test')
+    await user.should_see('This host has been up')

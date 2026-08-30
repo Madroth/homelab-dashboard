@@ -75,7 +75,7 @@ def _clock(ts: float) -> str:
 
 def build():
     state = {'status': None, 'logs': [], 'errors': None, 'units': None,
-             'status_error': None, 'resources': None, 'query': ''}
+             'status_error': None, 'resources': None, 'query': '', 'reach': None}
 
     # ---------- shared chrome ----------
 
@@ -132,6 +132,7 @@ def build():
     stamp_containers = _stamp_for(
         'status', 30.0, partial=lambda d: bool(d.get('containers_error')))
     stamp_resources = _stamp_for('resources', 30.0)
+    stamp_network = _stamp_for('reach', 120.0)
 
     # F7. With 54 containers and 101 units, scrolling is not navigation.
     #
@@ -202,22 +203,37 @@ def build():
         errors = state['errors']
         failed = [e for e in (errors or {}).get('entries', []) if e['source'] == 'unit']
         unreadable = errors is not None and not errors['ok']
+        # A service that cannot be reached is broken, and the banner has to say so. Left
+        # out, the page would render "Nothing is broken" directly above a panel listing a
+        # dead endpoint -- the same self-contradiction that made absorbing System Status
+        # into this page the right call in the first place.
+        reach = state['reach']
+        down = (reach or {}).get('down') or []
 
         if errors is None:
             tone, title, detail = theme.TEXT_MUTED, 'Reading…', 'Collecting errors, units and containers.'
         elif unreadable:
             tone, title = theme.TEXT_MUTED, 'Cannot tell'
             detail = f"A source did not answer — {errors['error']}. What is shown is incomplete."
-        elif failed:
+        elif failed or down:
             tone, title = theme.RED, 'Something is broken'
-            names = ', '.join(u['origin'] for u in failed[:3])
-            detail = f"{len(failed)} unit(s) in a failed state: {names}."
+            parts = []
+            if failed:
+                names = ', '.join(u['origin'] for u in failed[:3])
+                parts.append(f"{len(failed)} unit(s) in a failed state: {names}")
+            if down:
+                parts.append('not reachable: ' + ', '.join(down[:3]))
+            detail = '. '.join(parts) + '.'
         elif errors['entries']:
             tone, title = theme.AMBER, 'Errors logged'
             detail = f"{len(errors['entries'])} distinct error(s) in the last 24h. Nothing is in a failed state."
+        elif reach is None:
+            tone, title = theme.TEXT_MUTED, 'Cannot tell'
+            detail = 'Errors and units are clear, but reachability has not been read yet.'
         else:
             tone, title = theme.GREEN, 'Nothing is broken'
-            detail = 'No failed units, and no errors logged in the last 24h.'
+            detail = ('No failed units, no errors logged in the last 24h, and every '
+                      'endpoint answered.')
 
         dashed = tone == theme.TEXT_MUTED
         with ui.row().classes('items-center no-wrap').style(
@@ -549,6 +565,94 @@ def build():
         elif len(all_units) > len(shown):
             ui.label(f'{len(all_units) - len(shown)} more units not shown').style(
                 f'font-size:10.5px;color:{theme.TEXT_DIM};margin-top:8px')
+
+    # ---------- network & reachability (F14) ----------
+
+    @ui.refreshable
+    def render_network():
+        reach = state['reach']
+        if reach is None:
+            ui.element('div').classes('nq-skel').style(
+                'height:96px;border-radius:9px;background:rgba(255,255,255,0.04);width:100%')
+            return
+
+        ts = reach['tailscale']
+        with ui.column().style('gap:10px;width:100%'):
+            if not ts['ok']:
+                _unknown_box(f"Tailscale — {ts['error']}")
+            else:
+                with ui.row().classes('items-center no-wrap w-full').style(
+                        f'gap:12px;padding:11px 14px;border-radius:9px;'
+                        f'background:{theme.CARD_BG};border:1px solid {theme.BORDER}'):
+                    ui.icon('fa-solid fa-network-wired').style(
+                        f'color:{theme.GREEN};font-size:12px')
+                    ui.label(f"tailnet {ts['backend'].lower()} · {ts['self']}").style(
+                        f"font-size:11.5px;font-weight:600;color:{theme.TEXT};"
+                        f"font-family:'JetBrains Mono',monospace")
+                    ui.space()
+                    for peer in ts['peers']:
+                        tone = theme.GREEN if peer['online'] else theme.TEXT_DIM
+                        with ui.row().classes('items-center no-wrap').style('gap:6px;flex:none'):
+                            ui.element('div').style(
+                                f"width:6px;height:6px;border-radius:50%;background:{tone}")
+                            ui.label(peer['host']).style(
+                                f'font-size:10.5px;color:{tone}')
+
+            mount = reach['mount']
+            if not mount['ok']:
+                _unknown_box(f"NAS {mount['path']} — {mount['error']}")
+            else:
+                tone = theme.AMBER if mount.get('slow') else theme.GREEN
+                note = (' — slow, this is how the 22 Aug flap began'
+                        if mount.get('slow') else '')
+                with ui.row().classes('items-center no-wrap w-full').style(
+                        f'gap:12px;padding:11px 14px;border-radius:9px;'
+                        f'background:{theme.CARD_BG};border:1px solid '
+                        + (theme.AMBER if mount.get('slow') else theme.BORDER)):
+                    ui.icon('fa-solid fa-hard-drive').style(f'color:{tone};font-size:12px')
+                    ui.label(mount['path']).style(
+                        f"font-size:11.5px;font-weight:600;color:{theme.TEXT};"
+                        f"font-family:'JetBrains Mono',monospace")
+                    ui.label(f"answered in {mount['latency_ms']:.0f} ms{note}").style(
+                        f'font-size:11px;color:{tone}')
+
+            for ep in reach['endpoints']:
+                tone = theme.GREEN if ep['ok'] else theme.RED
+                with ui.row().classes('items-center no-wrap w-full').style(
+                        f'gap:12px;padding:10px 14px;border-radius:9px;'
+                        f'background:{theme.CARD_BG};border:1px solid '
+                        + (theme.RED if not ep['ok'] else theme.BORDER)):
+                    ui.element('div').style(
+                        f'width:7px;height:7px;border-radius:50%;background:{tone};flex:none')
+                    ui.label(ep['name']).style(
+                        f'font-size:11.5px;font-weight:600;color:{theme.TEXT};flex:none;width:150px')
+                    ui.label(ep['url']).style(
+                        f"flex:1;min-width:0;font-size:10.5px;color:{theme.TEXT_DIM};"
+                        f"font-family:'JetBrains Mono',monospace;overflow:hidden;"
+                        f"text-overflow:ellipsis;white-space:nowrap")
+                    if ep['reached']:
+                        ui.label(f"HTTP {ep['status']} · {ep['latency_ms']:.0f} ms").style(
+                            f'font-size:10.5px;color:{tone};flex:none')
+                    else:
+                        # The distinction F14 exists for: the host can be up and the
+                        # service still dead. Say which.
+                        ui.label('did not answer').style(
+                            f'font-size:10.5px;font-weight:700;color:{theme.RED};flex:none')
+
+            if not reach['endpoints']:
+                return
+            for ep in reach['endpoints']:
+                if not ep['ok'] and ep['error']:
+                    ui.label(f"{ep['name']}: {ep['error']}").style(
+                        f'font-size:10.5px;color:{theme.TEXT_DIM};word-break:break-word')
+
+            up = system.get_uptime()
+            if up['ok']:
+                ui.label(f"This host has been up {_duration(up['seconds'])}.").style(
+                    f'font-size:10.5px;color:{theme.TEXT_DIM};margin-top:2px')
+            else:
+                ui.label(f"Host uptime unreadable — {up['error']}").style(
+                    f'font-size:10.5px;color:{theme.AMBER};margin-top:2px')
 
     # ---------- containers, metrics, logs (carried over from System Status) ----------
 
@@ -1001,6 +1105,16 @@ def build():
             state['logs'] = logs
             render_logs.refresh()
 
+    async def refresh_network():
+        reach = await run.io_bound(system.get_reachability)
+        if reach is None:
+            return
+        if client_alive():
+            state['reach'] = reach
+            render_network.refresh()
+            render_verdict.refresh()
+            stamp_network.refresh()
+
     async def refresh_resources():
         res = await run.io_bound(system.get_host_resources)
         if res is None:
@@ -1028,6 +1142,7 @@ def build():
         await refresh_errors()
         await refresh_resources()
         await refresh_status()
+        await refresh_network()
 
     # ---------- AI context ----------
 
@@ -1108,6 +1223,9 @@ def build():
         _section_label('RESOURCES', stamp=stamp_resources)
         render_resources()
 
+        _section_label('NETWORK & REACHABILITY', stamp=stamp_network)
+        render_network()
+
         with ui.row().classes('items-center no-wrap').style('margin:28px 0 12px;gap:10px'):
             ui.label('DAEMON LOG (LAST 100 LINES)').style(
                 f'font-size:11.5px;font-weight:700;letter-spacing:0.5px;color:{theme.TEXT_DIM}')
@@ -1119,14 +1237,18 @@ def build():
     ui.timer(0.05, refresh_resources, once=True)
     ui.timer(0.05, refresh_status, once=True)
     ui.timer(0.05, refresh_logs, once=True)
+    ui.timer(0.2, refresh_network, once=True)
     ui.timer(15.0, refresh_status)
     ui.timer(15.0, refresh_resources)
     ui.timer(30.0, refresh_errors)
+    # Slower than the rest: every probe is a network round trip with a timeout budget.
+    ui.timer(60.0, refresh_network)
 
     def tick_stamps():
         if not client_alive():
             return
-        for stamp in (stamp_errors, stamp_units, stamp_containers, stamp_resources):
+        for stamp in (stamp_errors, stamp_units, stamp_containers, stamp_resources,
+                      stamp_network):
             stamp.refresh()
 
     ui.timer(5.0, tick_stamps)

@@ -1,4 +1,5 @@
 import collections
+import concurrent.futures
 import json
 import os
 import re
@@ -592,6 +593,144 @@ def resource_window(at: float, window: float = 300.0) -> dict:
             out['metrics'][metric] = {'label': _TREND_LABELS[metric],
                                       'min': min(values), 'max': max(values)}
     return out
+
+
+# F14. Reachability, and the reason it is its own reader: os.path.ismount() answers
+# "is something mounted here", which is not the question. On 2026-08-22 the NAS spent an
+# afternoon logging `CIFS: VFS: ... has not responded in 180 seconds` while that check
+# passed the whole time, so every surface on this dashboard called it healthy. A mount
+# that cannot answer is down, whatever the mount table says.
+#
+# Everything here is checked at the service layer rather than by ping, for the same
+# reason: a host that answers ICMP while its service is dead is the failure, not the
+# reassurance. QNAP2 is deliberately absent and must stay absent -- it is the off-limits
+# backup vault (ADR 22) and the restic job is the only sanctioned thing that talks to it.
+NAS_MOUNT = '/mnt/Multimedia'
+
+_REACH_CACHE = {'time': 0.0, 'data': None}
+_REACH_CACHE_TTL = 20.0
+_PROBE_TIMEOUT = 4.0
+
+# Named here rather than derived, so what the lab considers load-bearing is an explicit
+# list somebody can argue with. Each is a real endpoint of the service, not its front door.
+_ENDPOINTS = [
+    ('Omega — Ollama', 'http://100.74.2.92:11434/api/tags'),
+    ('ntfy', 'http://100.87.245.107:5001/v1/health'),
+    ('Uptime Kuma', 'http://100.87.245.107:3001/'),
+    ('Dozzle', 'http://100.87.245.107:8888/'),
+]
+
+# Tailnet peers this lab actually depends on. The tailnet also carries family laptops and
+# phones; listing those here would turn a lab health page into a presence tracker, which
+# is neither its job nor anybody's business.
+_LAB_PEERS = {'omega', 'steamdeck', 'kitchen'}
+
+
+def probe_mount(path: str = NAS_MOUNT, timeout: float = 5.0) -> dict:
+    """Does the share answer, or is it merely listed in the mount table?
+
+    The I/O runs as a subprocess with a timeout on purpose: a hung CIFS call blocks
+    uninterruptibly, so doing this in-process would wedge the reader that is supposed to
+    report the problem.
+    """
+    if not os.path.ismount(path):
+        return {'ok': False, 'path': path, 'mounted': False, 'responded': False,
+                'error': f'{path} is NOT MOUNTED'}
+
+    started = time.time()
+    ok, out = _run(['stat', '-f', '-c', '%b %a', path], timeout=timeout)
+    elapsed = (time.time() - started) * 1000
+    if not ok:
+        return {'ok': False, 'path': path, 'mounted': True, 'responded': False,
+                'latency_ms': elapsed,
+                'error': f'mounted, but did not answer within {timeout:.0f}s — {out}'}
+    return {'ok': True, 'path': path, 'mounted': True, 'responded': True,
+            'latency_ms': elapsed, 'error': None,
+            # A share that answers in two seconds is not healthy, it is on its way out.
+            'slow': elapsed > 1000}
+
+
+def _probe_endpoint(name: str, url: str, timeout: float = _PROBE_TIMEOUT) -> dict:
+    import requests
+    started = time.time()
+    try:
+        resp = requests.get(url, timeout=timeout)
+        elapsed = (time.time() - started) * 1000
+        # Any answer proves the service is listening and serving; 4xx/5xx is a different
+        # problem from unreachable, so it is reported as reached-but-unhappy, not as down.
+        return {'name': name, 'url': url, 'ok': resp.status_code < 400,
+                'reached': True, 'status': resp.status_code, 'latency_ms': elapsed,
+                'error': None if resp.status_code < 400 else f'HTTP {resp.status_code}'}
+    except Exception as e:
+        return {'name': name, 'url': url, 'ok': False, 'reached': False, 'status': None,
+                'latency_ms': (time.time() - started) * 1000,
+                'error': f'{type(e).__name__}: {e}'}
+
+
+def get_tailscale() -> dict:
+    ok, out = _run(['tailscale', 'status', '--json'], timeout=8)
+    if not ok:
+        return {'ok': False, 'error': out, 'peers': []}
+    try:
+        data = json.loads(out or '{}')
+    except json.JSONDecodeError as e:
+        return {'ok': False, 'error': f'unreadable tailscale output ({e})', 'peers': []}
+
+    self_node = data.get('Self') or {}
+    peers = []
+    for peer in (data.get('Peer') or {}).values():
+        host = peer.get('HostName') or ''
+        if host.lower() not in _LAB_PEERS:
+            continue
+        peers.append({'host': host, 'online': bool(peer.get('Online')),
+                      'os': peer.get('OS') or '', 'last_seen': peer.get('LastSeen') or ''})
+    peers.sort(key=lambda p: (p['online'], p['host'].lower()))
+
+    backend = data.get('BackendState') or 'unknown'
+    return {'ok': backend == 'Running', 'error': None if backend == 'Running'
+            else f'tailscaled backend is {backend}, not Running',
+            'backend': backend, 'self': self_node.get('HostName') or '',
+            'ips': data.get('TailscaleIPs') or [], 'peers': peers}
+
+
+def get_reachability() -> dict:
+    """Tailscale, the NAS mount's real responsiveness, and the endpoints this lab needs."""
+    now = time.time()
+    if (_REACH_CACHE['data'] is not None
+            and (now - _REACH_CACHE['time']) < _REACH_CACHE_TTL):
+        return _REACH_CACHE['data']
+
+    # Probed in parallel: serially, four dead endpoints would take four timeouts and the
+    # panel would be the slowest thing on the page.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(_ENDPOINTS) + 1) as pool:
+        mount_future = pool.submit(probe_mount)
+        endpoint_futures = [pool.submit(_probe_endpoint, name, url)
+                            for name, url in _ENDPOINTS]
+        endpoints = [f.result() for f in endpoint_futures]
+        mount = mount_future.result()
+
+    tailscale = get_tailscale()
+    down = ([e['name'] for e in endpoints if not e['ok']]
+            + ([mount['path']] if not mount['ok'] else [])
+            + ([] if tailscale['ok'] else ['tailscale']))
+    data = {'ok': not down, 'read_at': now, 'error': None,
+            'tailscale': tailscale, 'mount': mount, 'endpoints': endpoints,
+            'down': down}
+    _REACH_CACHE.update(time=now, data=data)
+    return data
+
+
+def get_uptime() -> dict:
+    """Host uptime -- the other half of "system status beyond the media stack"."""
+    ok, raw = _read_proc('/proc/uptime')
+    if not ok:
+        return {'ok': False, 'error': raw}
+    try:
+        seconds = float(raw.split()[0])
+    except (IndexError, ValueError) as e:
+        return {'ok': False, 'error': f'unreadable /proc/uptime ({e})'}
+    return {'ok': True, 'error': None, 'seconds': seconds,
+            'booted_at': time.time() - seconds}
 
 
 def get_top_processes(limit: int = 8) -> dict:
