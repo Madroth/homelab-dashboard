@@ -138,10 +138,18 @@
         below three readings or 60s of span. F10: an error detail now shows neighbouring
         errors within ±5m sorted by proximity, plus the resource range retained around
         then — and says "nothing was retained" rather than implying calm. Suite 110 → 124.
-  - [ ] Next from `LAB_HEALTH_FEATURES.md`: P3 — SMART (F13), network and reachability
-        (F14, at the service layer, never a ping), backups (F15, QNAP2 never probed) and
-        remote hosts (F16, with an explicit "last reviewed" since this box cannot
-        enumerate them). P4 stays parked on registry-driven work.
+  - [x] **F14 done.** Reachability: the NAS mount probed by an actual bounded filesystem
+        call rather than `ismount()`, with mounted-but-unresponsive, not-mounted and slow
+        as three distinct answers; endpoints checked at the service layer with
+        reached-but-unhappy kept apart from did-not-answer; tailnet state filtered to lab
+        peers. It feeds the verdict, so a dead service cannot sit under a green banner.
+        Host uptime landed with it, closing the second P1 leftover.
+  - [ ] Rest of P3 from `LAB_HEALTH_FEATURES.md`: SMART (F13), backups (F15, QNAP2 never
+        probed) and remote hosts (F16, with an explicit "last reviewed" since this box
+        cannot enumerate them). P4 stays parked on registry-driven work.
+  - [ ] Still open from the original monitoring wishlist: rolling per-container health up
+        to a service-level verdict in the list. A container with no healthcheck declared
+        needs an answer that is not "healthy".
 
 - [ ] **Send to HomeLab — hardening (2026-08-18)** — full plan and findings live in
   `homelab-intake/TODO.md` ("Send to HomeLab + its support systems"); this is the

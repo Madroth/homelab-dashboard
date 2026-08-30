@@ -51,9 +51,9 @@ you design the "cannot tell" face before the healthy one.** Same reasoning behin
 
 ## What to do next
 
-1. **Lab Health P3** — SMART (F13), network and reachability (F14), backups (F15), remote
-   hosts (F16). Also the two P1 leftovers annotated in `TODO.md`: host uptime and Tailscale
-   reachability, and rolling per-container health up to a service-level verdict.
+1. **Lab Health P3, remainder** — SMART (F13), backups (F15), remote hosts (F16). F14 and
+   host uptime are done. Also still open: rolling per-container health up to a service-level
+   verdict, where a container with no healthcheck needs an answer that is not "healthy".
 2. **`reclassify()` and the Rejected folder have no tests.** `test_media_fixes.py` covers undo
    and the failure-surfacing paths; those two are the remaining gaps.
 3. **Give `services/media.py` a defined boundary** — it imports media-curator's internals over
@@ -99,7 +99,17 @@ predecessor projects died:
 - This repo is **not** the one `github-plane-sync` watches (that is `Madroth/Homelab`), and
   `TODO.md` is not published anywhere. The dashboard's own Plane writes are articles, not tasks.
 
-## Live lab state worth knowing (2026-08-23)
+## Live lab state worth knowing (2026-08-30)
+
+- **Omega's Ollama is not answering on `100.74.2.92:11434`** — found by F14 the moment it was
+  built, and confirmed by hand: `tailscale ping Omega` returns instantly, so the host is up
+  and the tailnet is fine, but the API does not answer inside 15s. The AI sidebar's local/agy
+  model path depends on this, and `~/shared/ask-omega.py` will be failing too. Omega is
+  Windows, RDP-only by policy — restarting the Ollama service is Chris's to do. This is
+  exactly the failure class F14 exists for: a host that answers at the network layer while
+  its service is dead.
+
+## Live lab state from 2026-08-23 (recheck before trusting)
 
 None of this is a dashboard bug — it is what the dashboard is now showing:
 

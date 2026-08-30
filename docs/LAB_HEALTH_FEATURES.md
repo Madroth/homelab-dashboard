@@ -177,6 +177,8 @@ results. `smartd` currently mails alerts into a mail system that does not exist 
 so this is the only place they would be seen.
 
 ### F14 · Network & reachability
+
+> **Done 2026-08-30.** `probe_mount()` makes a real bounded filesystem call instead of trusting `ismount()`; mounted-but-unresponsive, not-mounted and slow are three answers. Endpoints are checked at the service layer, with reached-but-unhappy kept distinct from did-not-answer, probed in parallel. Tailnet peers filtered to lab hosts. Feeds the verdict banner. QNAP2 is never probed and a test asserts it.
 Tailscale state, the CIFS mount's real responsiveness (not just "is it a mountpoint"), and
 whether key endpoints answer — Omega's model server at the service layer, never a ping.
 
