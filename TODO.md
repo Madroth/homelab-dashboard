@@ -151,6 +151,53 @@
         to a service-level verdict in the list. A container with no healthcheck declared
         needs an answer that is not "healthy".
 
+- [ ] **Local model host — interim substitution, needs a real answer (2026-09-01)**
+  Omega's Ollama stopped answering and the AI sidebar's local-model path died with it. The
+  dashboard now points at the **local** Ollama on this box instead. That is a stopgap chosen
+  deliberately over building failover, and it has real costs recorded below.
+
+  **What happened.** `100.74.2.92:11434` refused to complete a TCP handshake while
+  `tailscale ping Omega` returned in 0s — host up, service dead. On Omega itself
+  `http://localhost:11434` was also unreachable, so it was not a firewall or an `OLLAMA_HOST`
+  binding problem: Ollama simply was not running. Found by F14 the day it was built, entirely
+  by accident, which is the part that should worry us — see "detection" below.
+
+  **What we substituted.** `services/ai/chat.py` now defaults to `http://172.17.0.1:11434`,
+  the local instance, bound to the docker0 bridge so containers reach it at the gateway. It
+  has ~19 GB of models already on disk and had been running untouched for 8 days.
+
+  **What it costs, measured not guessed:**
+  - Local inference is **CPU-only and stays that way**. The GTX 680M is Kepler, compute
+    capability 3.0, under Ollama's 5.0 floor; the last driver branch supporting it (470.xx)
+    is EOL and will not build on this kernel. Ollama logs `offloaded 0/13 layers to GPU`.
+    No amount of driver work changes this — it is below the supported floor, not misconfigured.
+  - Only `mistral:7b` and `qwen2.5-coder:7b` advertise the `tools` capability, and the sidebar
+    needs tool calling. `phi3:mini` and `gemma2:9b` cannot do it at all.
+  - Speed: `phi3:mini` managed 5.4 tok/s; the 7B tool-capable models are far slower again.
+    Omega did 39 tok/s on a 32B. So the sidebar is now usable for short exchanges and
+    frustrating for anything longer, and a 7B answers worse than a 32B besides.
+
+  **The better solution, to design later — do not just leave the stopgap in place:**
+  - [ ] Stop hardcoding one host. An ordered candidate list (Omega, then local) with a cached
+        reachability probe is the shape; F14's `probe_endpoint`/`get_reachability` already does
+        exactly this check, so the machinery exists and only the policy is missing.
+  - [ ] Decide the routing rule once there is a choice again: small/cheap work local, anything
+        long or accuracy-sensitive on Omega. "Offload the minor things" was Chris's framing.
+  - [ ] Model identity is not portable across hosts. `DEFAULT_OLLAMA_MODEL` was a 32B that does
+        not exist locally, so pointing the host elsewhere without changing the model would have
+        failed with a model-not-found rather than falling back. Whatever replaces this has to
+        carry host *and* model together.
+
+  **Not this project, but the reason this bit us:** nothing detected Omega's absence. The
+  dashboard found it by accident while building an unrelated feature, and it had been down long
+  enough that nobody could say when it started. A check for Omega's Ollama belongs in
+  `homelab-monitoring`'s registry, and with M1 closed there is now a phone to tell. Recorded
+  here only as the cause; the work is theirs.
+
+  **Omega's own fix is Chris's:** Ollama on Windows runs as a tray app tied to a login session,
+  not a service, so a reboot with nobody logging in takes it down silently and will do so again.
+  Running it as a real Windows service is the durable fix.
+
 - [ ] **Send to HomeLab — hardening (2026-08-18)** — full plan and findings live in
   `homelab-intake/TODO.md` ("Send to HomeLab + its support systems"); this is the
   dashboard-side slice of it. Four fixes are committed (`f489f8f` label failure no longer

@@ -93,7 +93,12 @@ predecessor projects died:
 - Run: `systemctl --user restart homelab-dashboard.service` (NiceGUI runs `reload=False`, so
   code changes need a restart), `journalctl --user -u homelab-dashboard.service -f` to watch.
 - `psutil` is **not** installed; `/proc` and `/sys/class/thermal` cover what the resource panel
-  needs. `smartctl` and `iostat` are present, `lm-sensors` is not, and there is no discrete GPU.
+  needs. `smartctl` and `iostat` are present, `lm-sensors` is not. There **is** a discrete GPU
+  (GeForce GTX 680M) but nothing can use it: Kepler, compute capability 3.0, below Ollama's 5.0
+  floor, and the last driver branch supporting it (470.xx) is EOL and will not build against
+  this kernel. Ollama runs CPU-only here and logs `offloaded 0/13 layers to GPU`. Treat the box
+  as GPU-less for planning, but do not record it as having no GPU — that sent one session
+  looking for hardware that is physically present and simply unusable.
 - `docker stats --no-stream` across 37 containers takes 1–2s — fetch per-container on drill-down,
   never synchronously in a render. The error read is cached 20s.
 - This repo is **not** the one `github-plane-sync` watches (that is `Madroth/Homelab`), and
@@ -115,7 +120,9 @@ None of this is a dashboard bug — it is what the dashboard is now showing:
 
 - **3 units failed**: `plane-backup.service` (has never once succeeded; blocked by RF-1 because
   the hostname `qnap2` does not resolve), `livescore.service`, `snap.tailscale.tailscaled.service`.
-- **Memory is tight** — ~2 GB available of 15 GB, and **swap sits at ~99% used**.
+- **Memory** — 30 GB total with ~11 GB available and swap ~2.9 of 4 GB used (2026-09-01). The
+  RAM was upgraded at some point; earlier handoffs said 15 GB total with 2 GB free and were
+  read forward for a week after they stopped being true.
 - **CPU package around 72–76 °C.**
 - The **NAS flapped** on 2026-08-22 afternoon — repeated `CIFS: VFS: ... has not responded in 180
   seconds` while the mountpoint check kept passing. Quiet since. This is exactly the class of

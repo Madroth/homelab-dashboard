@@ -14,8 +14,21 @@ DASHBOARD_SYSTEM_PROMPT = (
     "action tool (like edit_media_tool) with that ID."
 )
 
-DEFAULT_OLLAMA_HOST = "http://100.74.2.92:11434"  # Omega, over Tailscale -- see ~/HomeLab/HARDWARE.md
-DEFAULT_OLLAMA_MODEL = "qwen2.5:32b-instruct-q4_K_M"  # verified tool-calling-capable against Omega
+# Interim, 2026-09-01: this pointed at Omega (http://100.74.2.92:11434) until its Ollama
+# stopped running -- host up, service dead, and nothing noticed for days. Pointed at the local
+# instance instead so the sidebar works at all. See TODO.md "Local model host" for what this
+# costs and the routing design that should replace it; do not treat this as settled.
+#
+# 172.17.0.1 rather than 127.0.0.1 is not a typo: the local ollama.service binds to the docker0
+# bridge so containers can reach it at the gateway, and it does not listen on loopback.
+OMEGA_OLLAMA_HOST = "http://100.74.2.92:11434"  # kept so the address is not lost when Omega returns
+DEFAULT_OLLAMA_HOST = "http://172.17.0.1:11434"
+
+# Host and model travel together. The previous default was a 32B that exists only on Omega, so
+# repointing the host alone would have failed with model-not-found rather than degrading. Of the
+# models on this box only mistral:7b and qwen2.5-coder:7b advertise Ollama's `tools` capability,
+# and the sidebar cannot work without it -- phi3:mini and gemma2:9b are faster but toolless.
+DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b"
 
 MAX_TOOL_ITERATIONS = 6
 
@@ -194,8 +207,10 @@ def _send_local(user_message: str, history: list[dict], settings: dict, context_
                     "messages": messages,
                     "tools": ollama_schemas,
                     "stream": False,
-                    # Required -- omitting this silently falls back to partial CPU inference
-                    # on 32B models (measured: 4.5 tok/s vs 39 tok/s). See ~/shared/ask-omega.py.
+                    # Required. On Omega, omitting it silently fell back to partial CPU
+                    # inference on 32B models (4.5 tok/s vs 39). Against the local CPU-only
+                    # instance it matters for a different reason -- the default context
+                    # reserves memory this box does not have to spare. See ~/shared/ask-omega.py.
                     "options": {"num_ctx": 4096},
                 },
                 timeout=180,

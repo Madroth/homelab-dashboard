@@ -223,7 +223,8 @@ fixes, alert-channel health and routing. Design already exists for these in
   directly; `/proc/pressure/*`, `/proc/loadavg`, `/proc/meminfo` and `/sys/class/thermal`
   need nothing extra.
 - The journal is large — always bound queries by `--since` and `-p`, and paginate.
-- `lm-sensors` is not installed and there is no discrete GPU on this host; temperatures come
-  from `/sys/class/thermal` only.
+- `lm-sensors` is not installed; temperatures come from `/sys/class/thermal` only. There is a
+  discrete GPU (GTX 680M) but it is unusable for compute — Kepler, compute capability 3.0,
+  under Ollama's 5.0 floor — so there is no GPU telemetry worth reading either.
 - Reads should stay off the main thread — the existing pages use `run.io_bound` for exactly
   this.

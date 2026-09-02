@@ -30,11 +30,11 @@ def build():
                                         password_toggle_button=True).style('width:100%').props('outlined dense')
 
             ui.label('Ollama Host (for Local Models)').style(f'font-size:12px;color:{theme.TEXT_MUTED}')
-            ollama_input = ui.input(placeholder='http://100.74.2.92:11434').style('width:100%').props(
+            ollama_input = ui.input(placeholder='http://172.17.0.1:11434').style('width:100%').props(
                 'outlined dense')
 
             ui.label('Ollama Model (for Local Models)').style(f'font-size:12px;color:{theme.TEXT_MUTED}')
-            ollama_model_input = ui.input(placeholder='qwen2.5:32b-instruct-q4_K_M').style('width:100%').props(
+            ollama_model_input = ui.input(placeholder='qwen2.5-coder:7b').style('width:100%').props(
                 'outlined dense')
 
             with ui.row().classes('justify-end w-full'):
