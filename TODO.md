@@ -13,6 +13,31 @@
   - [x] SRE Hardening (Docker Socket Proxy, Autoheal labels, Resource Limits).
   - [x] Wire live monitoring into Dashboard (DEFCON banner, container states).
 
+- [ ] **Game Server control panel — reactivation from the dashboard** (Chris, 2026-09-01)
+    - Context: the WoW realm (gamelab tenant `wotlk`) and the Minecraft server
+      (`crafty-minecraft`) are both deliberately stopped to free resources. They cost
+      real headroom while idle — measured 2026-09-01: WoW ~5.5 GiB and ~100% of a core
+      with 40 playerbots and nobody playing, Minecraft ~950 MiB and ~100% of a core.
+      Bringing either back currently means a terminal and knowing the commands.
+    - [ ] An area on the dashboard listing the game servers with their current state,
+      and a control to start one back up.
+    - [ ] Starting must be **asynchronous with progress**, not a button that blocks.
+      A WoW cold start takes minutes: the client-data init and world-DB import run
+      before the worldserver is ready, and "container running" is *not* "playable".
+    - [ ] Show when it is genuinely ready, not merely started. gamelab's tenant
+      contract already declares how to tell (`health.type: log_marker`, container
+      `ac-worldserver`, marker `ready...`), so the dashboard should surface whatever
+      gamelab reports rather than inventing its own check.
+    - [ ] Show the cost of turning it on — slice memory in use against its ceiling —
+      since the whole reason these are off is resource headroom.
+    - **Depends on gamelab exposing this properly first** — see gamelab
+      `docs/OPEN-WORK.md` item 4b. The dashboard should call gamelab, not shell out to
+      `docker` itself: starting a tenant has to go through `gamelab _up`, which is where
+      the pending-neutralise safety check lives. A second start path that skips it would
+      reintroduce a hazard that took real work to close.
+    - Note only one game tenant may run at a time (`slots.capacity: 1`), so the UI is a
+      *switch* between servers more than independent on/off toggles.
+
 - [ ] **Article Intake (Tag Filtering)** — ⏸ ON HOLD (Chris, 2026-08-02; revisit later)
   - [ ] Add a dedicated tag-filter UI to the article intake tab — tags currently only match via the free-text search bar, no way to browse/filter by tag directly.
   - [ ] Decide on presentation (filter chips, tag cloud, etc.) alongside the existing Homelab/News/Errors folder sidebar.
