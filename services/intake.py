@@ -134,31 +134,159 @@ def _articles_dir_signature() -> tuple:
     return tuple(sorted((f, os.path.getmtime(f)) for f in files))
 
 
+INDEX_COLUMNS = (
+    'file_path, title, date_processed, source_url, dup_of, auto_generated, tags, '
+    'suggested_tags, content_type, educational, priority_score, why_it_matters, status, '
+    'user_folders, body, raw_content'
+)
+
+
+def _index_signature() -> tuple | None:
+    try:
+        st = os.stat(INDEX_DB)
+    except OSError:
+        return None
+    return (st.st_mtime, st.st_size)
+
+
+def _article_from_row(row) -> dict:
+    """Build the same dict _article_from_frontmatter does, from an index row.
+
+    The two must stay in step: this is the fast path and that one is the fallback for
+    articles the index does not carry, and a page cannot tell which produced a given item."""
+    (file_path, title, date_processed, source_url, dup_of, auto_generated, tags,
+     suggested_tags, content_type, educational, priority_score, why_it_matters, status,
+     user_folders, body, raw_content) = row
+    filename = os.path.basename(file_path)
+    body = body or ''
+    return {
+        'id': filename,
+        'title': title or filename.replace('.md', ''),
+        'date': (date_processed or '')[:19].replace('T', ' '),
+        'source': source_url or '',
+        'snippet': _snippet_from_body(body, r'## Summary\n\n(.*?)(?:\n##(?!#)|$)'),
+        'is_duplicate': bool(dup_of),
+        'auto_generated': bool(auto_generated),
+        'tags': [str(t) for t in json.loads(tags or '[]')],
+        'suggested_tags': [str(t) for t in json.loads(suggested_tags or '[]')],
+        'raw_content': raw_content or '',
+        'content_type': content_type or '',
+        'educational': bool(educational),
+        'priority_score': priority_score,
+        'why_it_matters': why_it_matters,
+        'status': status or 'Inbox',
+        'user_folders': [str(f) for f in json.loads(user_folders or '[]')],
+        'reading_minutes': _reading_minutes(body),
+    }
+
+
+def _sync_index_row(filepath: str) -> None:
+    """Push a frontmatter edit into the index row for that file.
+
+    The dashboard rewrites frontmatter directly (status, tags, folders, dup_of) and the
+    files stay canonical either way. But list_articles() now READS the index, so without
+    this the list would keep serving the pre-edit row until the daemon happened to reindex
+    -- the click would appear to do nothing. docs/DESIGN.md §7 already calls for exactly
+    this: update SQLite immediately, patch the Markdown so files stay canonical.
+
+    raw_content is refreshed too, not just the edited field: it is the whole file
+    lowercased, so any frontmatter change alters what search matches.
+
+    Never raises. The file is the source of truth; a stale index row is recoverable with a
+    reindex, whereas an exception here would fail a save that already succeeded on disk."""
+    try:
+        if not os.path.exists(INDEX_DB) or not os.path.exists(filepath):
+            return
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+        meta, body = _parse_frontmatter(content)
+        if meta is None:
+            return
+        conn = sqlite3.connect(INDEX_DB)
+        try:
+            conn.execute(
+                """UPDATE articles SET title=?, content_type=?, tags=?, suggested_tags=?,
+                       educational=?, why_it_matters=?, status=?, dup_of=?, user_folders=?,
+                       body=?, raw_content=?
+                   WHERE file_path=?""",
+                (meta.get('title'), meta.get('content_type'),
+                 json.dumps(meta.get('tags') or []),
+                 json.dumps(meta.get('suggested_tags') or []),
+                 1 if meta.get('educational') else 0,
+                 meta.get('why_it_matters'),
+                 meta.get('status') or 'Inbox',
+                 meta.get('dup_of'),
+                 json.dumps(meta.get('user_folders') or []),
+                 body, content.lower(), filepath),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error, ValueError):
+        return
+
+
+def _articles_from_index() -> tuple[list[dict], set[str]]:
+    """Returns (articles, filenames the index covered). Empty on any index problem, so the
+    file fallback below simply takes over rather than the page going blank."""
+    if not os.path.exists(INDEX_DB):
+        return [], set()
+    try:
+        conn = sqlite3.connect(f'file:{INDEX_DB}?mode=ro', uri=True)
+        try:
+            rows = conn.execute(f'SELECT {INDEX_COLUMNS} FROM articles').fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return [], set()
+
+    # Accept a row only when its file_path is inside the CURRENT ARTICLES_DIR. The index
+    # describes one specific directory; if ARTICLES_DIR has been pointed elsewhere -- a test
+    # fixture, a second corpus -- this index is not a cache of it, and serving its rows would
+    # mix two unrelated corpora into one list.
+    articles_dir = os.path.realpath(ARTICLES_DIR)
+    articles, covered = [], set()
+    for row in rows:
+        if os.path.realpath(os.path.dirname(row[0])) != articles_dir:
+            continue
+        filename = os.path.basename(row[0])
+        covered.add(filename)
+        if filename.startswith('duplicate-'):
+            continue
+        articles.append(_article_from_row(row))
+    return articles, covered
+
+
 def list_articles() -> list[dict]:
+    """Reads the SQLite index, not the article files -- homelab-intake's CLAUDE.md
+    constraint 1, and a 257x difference in practice (1,579 ms to parse 119 files against
+    6.1 ms to query them), which grows linearly with the archive.
+
+    Files the index does not carry still fall back to parsing: articles predating the
+    frontmatter migration, and any written since the last upsert. Today that set is empty,
+    but a blank page would be a far worse failure than a slow one, so the fallback stays."""
     if not os.path.exists(ARTICLES_DIR):
         return []
 
-    signature = _articles_dir_signature()
+    signature = (_index_signature(), _articles_dir_signature())
     if signature == _articles_cache['signature']:
         return _articles_cache['articles']
 
-    files = glob.glob(os.path.join(ARTICLES_DIR, '*.md'))
-    files.sort(reverse=True)
+    articles, covered = _articles_from_index()
 
-    articles = []
-    for filepath in files:
+    for filepath in glob.glob(os.path.join(ARTICLES_DIR, '*.md')):
         filename = os.path.basename(filepath)
-        if filename.startswith('duplicate-'):
+        if filename in covered or filename.startswith('duplicate-'):
             continue
-
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()
-
         meta, body = _parse_frontmatter(content)
         if meta is not None:
             articles.append(_article_from_frontmatter(filename, content, meta, body))
         else:
             articles.append(_article_from_legacy(filename, content))
+
+    articles.sort(key=lambda a: a['id'], reverse=True)
 
     _articles_cache['signature'] = signature
     _articles_cache['articles'] = articles
@@ -201,6 +329,7 @@ def mark_duplicate(filename: str) -> bool:
         yaml_block = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True)
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(f"---\n{yaml_block}---\n{body}")
+        _sync_index_row(filepath)
         return True
 
     if '**Duplicate:**' in content:
@@ -232,6 +361,7 @@ def _mutate_user_folders(filename: str, mutate) -> bool:
     yaml_block = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True)
     with open(filepath, 'w', encoding='utf-8') as f:
         f.write(f"---\n{yaml_block}---\n{body}")
+    _sync_index_row(filepath)
     return True
 
 
@@ -308,6 +438,7 @@ def _mutate_tags(filename: str, mutate) -> bool:
     yaml_block = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True)
     with open(filepath, 'w', encoding='utf-8') as f:
         f.write(f"---\n{yaml_block}---\n{body}")
+    _sync_index_row(filepath)
     return True
 
 
@@ -346,6 +477,7 @@ def dismiss_suggested_tag(filename: str, tag: str) -> bool:
     yaml_block = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True)
     with open(filepath, 'w', encoding='utf-8') as f:
         f.write(f"---\n{yaml_block}---\n{body}")
+    _sync_index_row(filepath)
     return True
 
 
