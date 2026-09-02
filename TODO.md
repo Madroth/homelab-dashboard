@@ -219,6 +219,33 @@
 
 ---
 
+- [ ] **`list_articles()` reads the article files, not the index (found 2026-09-01).**
+  homelab-intake's CLAUDE.md is explicit: "SQLite is a derived index... The dashboard reads
+  the index, never the files directly." `services/intake.py:list_articles()` instead globs
+  `articles/*.md` and parses every one. Measured on the live corpus: **1,579 ms to parse 119
+  articles (13.3 ms each), against 6.1 ms to pull the same metadata from
+  `index/articles.db` — 257x.** It degrades linearly: ~6.6 s at 500 articles, ~13 s at 1,000.
+  The `_articles_dir_signature()` mtime cache hides it (1 ms warm) but the full cost is paid
+  again whenever *any* article file changes, which now includes every in-place reprocess.
+
+  This is not simply a shortcut that can be swapped out — **the index does not carry what
+  the dashboard needs**: `snippet`/body, `raw_content` (which backs full-text search across
+  the whole corpus), `reading_minutes`, `user_folders`, `auto_generated`. That is the real
+  finding: the schema in `homelab-intake/docs/DESIGN.md §5` and the dashboard's actual needs
+  have diverged, and reading the files is the workaround that has been papering over it.
+
+  Two honest options, and this is Chris's call, not a refactor to be done quietly:
+  1. **Extend the index** to carry those fields (full-text search wants SQLite FTS5, which
+     is the right tool and would be *faster* than the current scan, not merely compliant).
+     Per homelab-intake's CLAUDE.md the schema contract changes in `docs/DESIGN.md §5`
+     **first**, then propagates to pipeline, index and dashboard.
+  2. **Amend the constraint** to say the dashboard reads the index for list/filter metadata
+     and the files for body content, which is roughly what a corrected implementation would
+     do anyway. Cheaper, and honest about the split.
+
+  Doing nothing is also a position, but it should be a chosen one: the constraint currently
+  says something the code does not do, which is how the next person gets misled.
+
 ## Not this project (pruned 2026-08-29)
 
 Chris's call: this backlog tracks the dashboard only. Work on the services the dashboard
