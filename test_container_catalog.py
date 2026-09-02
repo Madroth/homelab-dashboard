@@ -46,20 +46,61 @@ def test_oci_label_is_used_only_when_the_catalog_has_nothing():
 
 
 def test_a_blank_oci_label_is_not_a_description():
-    assert cc.describe('mystery', 'some/unknown:1', '   ')['text'] is None
+    # A whitespace label must not be mistaken for a description: the resolver
+    # falls through past it rather than rendering an empty claim.
+    d = cc.describe('mystery', 'some/unknown:1', '   ')
+    assert d['source'] != 'image label'
 
 
-def test_an_unknown_container_returns_none_rather_than_a_guess():
-    """The catalog must never invent. None is what makes the UI say it does not know."""
+def test_an_uncatalogued_container_derives_but_never_invents():
+    # The catalog must never invent a PURPOSE. For an image nobody has described,
+    # it falls through to the structural layer, whose every clause is read from
+    # docker rather than recalled -- and labels it as such, so it cannot pass for
+    # knowledge. Generating this with a local LLM was tested and rejected (see the
+    # module docstring): it called gluetun a file manager.
     d = cc.describe('something-nobody-documented', 'weird/image:1')
-    assert d['text'] is None
-    assert d['source'] == 'unknown'
+    assert d['source'] == 'structural'
+    assert 'weird/image' in d['text']
 
 
 def test_a_deliberately_undescribed_container_carries_what_would_settle_it():
-    d = cc.describe('context-server', 'context-server-context-server')
-    assert d['text'] is None
+    """It still gets a structural summary -- the hint rides alongside, so the UI can
+    show what IS known while being explicit that the purpose is not."""
+    d = cc.describe('context-server', 'context-server-context-server',
+                    project='context-server', service='context-server')
+    assert d['source'] == 'structural'
     assert 'hint' in d and d['hint']
+
+
+def test_structural_summary_makes_an_unknown_container_useful_with_no_human_step():
+    """The self-maintaining half: a container created a minute ago that nobody has
+    ever catalogued still says which stack it belongs to and what it is wired to."""
+    d = cc.describe('brand-new-thing', 'someone/never-seen:1',
+                    project='newstack', service='api',
+                    ports=['127.0.0.1:9999 -> 9999/tcp'], mounts=['/srv/data -> /data'])
+    assert d['source'] == 'structural'
+    assert 'newstack' in d['text'] and 'api' in d['text']
+    assert '9999' in d['text'] and '/srv/data' in d['text']
+
+
+def test_structural_never_beats_a_curated_entry():
+    d = cc.describe('prometheus', 'prom/prometheus:v3.5.0',
+                    project='homelab-monitoring', service='prometheus')
+    assert d['source'] == 'catalog'
+
+
+def test_structural_returns_nothing_when_docker_knows_nothing():
+    """A sentence with no content in it is worse than admitting ignorance."""
+    assert cc.derive_structural('x', '') is None
+    assert cc.describe('x', '')['source'] == 'unknown'
+
+
+def test_docker_internal_mounts_are_not_presented_as_meaningful_paths():
+    d = cc.derive_structural('c', 'img:1', 'p', 's',
+                             mounts=['/var/lib/docker/volumes/abc/_data -> /data',
+                                     '/srv/real -> /real'])
+    assert '/srv/real' in d
+    assert '/var/lib/docker' not in d
 
 
 def test_no_container_is_listed_as_undescribed_while_also_being_described():

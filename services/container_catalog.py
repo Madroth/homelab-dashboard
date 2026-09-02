@@ -16,13 +16,28 @@ RESOLUTION ORDER, most specific first:
      image wherever it runs, so a second Radarr somewhere else is described for
      free. This is the bulk of the catalog.
   3. The image's own OCI description label, if the image ships one.
-  4. Nothing. The UI must then say it does not know.
+  4. A structural summary derived purely from `docker inspect` -- compose stack,
+     image, published ports, host mounts. Not what the software DOES, but it
+     cannot be wrong, and it is real orientation for a container nobody has
+     described yet. This is what makes a newly created container useful
+     immediately with no human step.
+  5. Nothing. The UI must then say it does not know.
 
 NO GUESSING. An entry is written only where the purpose is actually known. A
 plausible-sounding invention is worse than a blank here, because a blank prompts
 someone to write the real answer while a confident wrong sentence never gets
-corrected. Containers deliberately left undescribed are listed in UNDESCRIBED
-below with what would settle them.
+corrected. Containers whose purpose is still unconfirmed are listed in UNDESCRIBED
+below with what would settle them; they still render their structural summary.
+
+GENERATING THESE WITH A LOCAL LLM WAS TESTED AND REJECTED (2026-09-01, phi3:mini
+on this host's Ollama, Omega's GPU being down). Of five images it produced three
+confident falsehoods: Radarr as handling "movies, TV shows, and music" (it is
+films only -- Sonarr does TV), gluetun as "file management" (it is a VPN
+gateway), and an invented purpose for a locally built image it could not
+possibly know. It cost 12-46s per container on CPU to be wrong. The failure mode
+is exactly the one this file is built around: fluent, confident, unverifiable,
+and never corrected. Layer 4 exists because a derived fact beats a generated
+guess.
 
 To add one: put it in BY_IMAGE unless the image is ambiguous on this host, in
 which case use BY_NAME. One sentence, present tense, says what it does and why
@@ -118,7 +133,6 @@ BY_IMAGE: dict[str, str] = {
 UNDESCRIBED: dict[str, str] = {
     'context-server': 'Locally built image (context-server-context-server) with no compose project on disk -- check where it was built from before describing it.',
     'defaulterr': 'varthe/defaulterr, in the media stack. Believed to set default audio/subtitle tracks in Plex by rule -- confirm against its config before writing that down.',
-    'pulsarr': 'lakker/pulsarr, in the media stack. Believed to sync Plex watchlists into Sonarr/Radarr -- confirm before writing that down.',
 }
 
 
@@ -139,14 +153,73 @@ def normalize_image(image: str) -> str:
     return f'{head}/{tail}' if head else tail
 
 
-def describe(name: str, image: str, oci_description: str | None = None) -> dict:
+def derive_structural(name: str, image: str, project: str | None = None,
+                      service: str | None = None, ports: list | None = None,
+                      mounts: list | None = None) -> str | None:
+    """A sentence built only from what Docker already knows.
+
+    This is NOT a description of what the software does -- nothing here can know
+    that. It is orientation: which stack this belongs to, what image it came from,
+    and what it is wired to. That is genuinely useful for a container nobody has
+    described yet, and it has the property the catalog cares most about: it cannot
+    be wrong, because every clause is read from `docker inspect` rather than
+    recalled from anywhere.
+
+    Returns None when Docker knows nothing beyond the name, so the caller can fall
+    through to saying it does not know rather than emitting a sentence with no
+    content in it.
+    """
+    parts: list[str] = []
+
+    if project and service:
+        parts.append(f'The `{service}` service of the `{project}` compose stack')
+    elif project:
+        parts.append(f'Part of the `{project}` compose stack')
+    elif service:
+        parts.append(f'The `{service}` service')
+
+    repo = normalize_image(image)
+    if repo:
+        parts.append(f'runs image `{repo}`' if parts else f'Runs image `{repo}`')
+
+    if not parts:
+        return None
+
+    sentence = ', '.join(parts) + '.'
+
+    # Published ports and host mounts are the two things that say what a container
+    # is actually wired into, which is usually the fastest route to recognising it.
+    host_ports = [p for p in (ports or []) if p]
+    if host_ports:
+        shown = ', '.join(host_ports[:3])
+        more = f' (+{len(host_ports) - 3} more)' if len(host_ports) > 3 else ''
+        sentence += f' Publishes {shown}{more}.'
+
+    host_paths = [m.split(' -> ')[0] for m in (mounts or []) if m and not m.startswith('/var/lib/docker')]
+    host_paths = [h for h in host_paths if h.startswith('/')]
+    if host_paths:
+        shown = ', '.join(host_paths[:3])
+        more = f' (+{len(host_paths) - 3} more)' if len(host_paths) > 3 else ''
+        sentence += f' Mounts {shown}{more}.'
+
+    return sentence
+
+
+def describe(name: str, image: str, oci_description: str | None = None,
+             project: str | None = None, service: str | None = None,
+             ports: list | None = None, mounts: list | None = None) -> dict:
     """Resolve one container's description.
 
     Returns {'text': str|None, 'source': str}. `source` is part of the contract, not
-    decoration: a curated sentence and a vendor's marketing blurb are different kinds
-    of claim, and a UI that presents them identically is quietly lying about how much
-    anyone actually knows. `text` of None means nobody has written one -- say so
-    rather than rendering an empty space that reads as "nothing to report".
+    decoration: a curated sentence, a vendor's marketing blurb and a summary derived
+    from `docker inspect` are three different kinds of claim, and a UI that presents
+    them identically is quietly lying about how much anyone actually knows. `text` of
+    None means nobody has written one and Docker knew nothing either -- say so rather
+    than rendering an empty space that reads as "nothing to report".
+
+    The structural layer is what makes this self-maintaining: a container created a
+    minute ago, that no human has ever heard of, still describes which stack it
+    belongs to and what it is wired to, with no catalog entry and no human step.
     """
     if name in BY_NAME:
         return {'text': BY_NAME[name], 'source': 'catalog'}
@@ -157,6 +230,13 @@ def describe(name: str, image: str, oci_description: str | None = None) -> dict:
 
     if oci_description and oci_description.strip():
         return {'text': oci_description.strip(), 'source': 'image label'}
+
+    structural = derive_structural(name, image, project, service, ports, mounts)
+    if structural:
+        result = {'text': structural, 'source': 'structural'}
+        if name in UNDESCRIBED:
+            result['hint'] = UNDESCRIBED[name]
+        return result
 
     if name in UNDESCRIBED:
         return {'text': None, 'source': 'unknown', 'hint': UNDESCRIBED[name]}

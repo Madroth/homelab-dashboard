@@ -693,9 +693,20 @@ def build():
                     with ui.column().style('gap:2px'):
                         ui.label(detail['description']).style(
                             f'font-size:11.5px;color:{theme.TEXT_MUTED};line-height:1.5')
-                        if detail.get('description_source') == 'image label':
+                        source = detail.get('description_source')
+                        if source == 'image label':
                             ui.label("from the image's own label, not written for this host").style(
                                 f'font-size:10px;color:{theme.TEXT_DIM};font-style:italic')
+                        elif source == 'structural':
+                            # Derived from docker inspect: what it is WIRED to, not what it
+                            # DOES. Saying so is the difference between orientation and a
+                            # claim about purpose.
+                            ui.label('derived from docker inspect — describes how it is wired, '
+                                     'not what it does').style(
+                                f'font-size:10px;color:{theme.TEXT_DIM};font-style:italic')
+                        if detail.get('description_hint'):
+                            ui.label(f"Still unconfirmed: {detail['description_hint']}").style(
+                                f'font-size:10px;color:{theme.AMBER};line-height:1.5;margin-top:3px')
             else:
                 with ui.row().classes('items-start no-wrap w-full').style(
                         f'gap:8px;padding:9px 11px;border-radius:8px;margin-bottom:12px;'

@@ -780,7 +780,10 @@ def get_container_detail(name: str, log_lines: int = 60) -> dict:
     # sentence and a vendor's own blurb are different kinds of claim.
     description = container_catalog.describe(
         name, config.get('Image', ''),
-        labels.get('org.opencontainers.image.description'))
+        labels.get('org.opencontainers.image.description'),
+        project=labels.get('com.docker.compose.project'),
+        service=labels.get('com.docker.compose.service'),
+        ports=ports, mounts=mounts)
 
     detail = {
         'ok': True, 'error': None, 'name': name,
