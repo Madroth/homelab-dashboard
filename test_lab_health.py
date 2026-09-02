@@ -939,3 +939,73 @@ async def test_the_page_shows_host_uptime(user: User, monkeypatch):
     _stub_page(monkeypatch, errors=_errors([]))
     await user.open('/lab-health-test')
     await user.should_see('This host has been up')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_container_detail_says_what_the_container_actually_is(user: User, monkeypatch):
+    """An image name answers 'what is it called', not 'what is it for'."""
+    status = dict(_HEALTHY_STATUS, containers=[
+        {'Names': 'gluetun', 'Status': 'Up 3 hours', 'Labels': ''}])
+    _stub_page(monkeypatch, errors=_errors([]), status=status)
+    monkeypatch.setattr(system_service, 'get_container_detail', lambda *a, **kw: {
+        'ok': True, 'error': None, 'name': 'gluetun', 'state': 'running', 'health': None,
+        'description': 'VPN gateway container. qbittorrent uses its network namespace.',
+        'description_source': 'catalog', 'description_hint': None,
+        'restarts': 0, 'started_at': '', 'finished_at': '', 'exit_code': 0,
+        'oom_killed': False, 'image': 'qmcgaw/gluetun:v3', 'project': None, 'service': None,
+        'ports': [], 'mounts': [], 'stats': None, 'stats_error': None,
+        'logs': [], 'log_error': None})
+
+    await user.open('/lab-health-test')
+    await user.should_see('gluetun')
+    user.find(marker='container-gluetun').click()
+    await asyncio.sleep(0.3)
+    await user.should_see('VPN gateway container. qbittorrent uses its network namespace.')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_an_undescribed_container_says_so_instead_of_rendering_blank(
+        user: User, monkeypatch):
+    """Blank space reads as 'nothing to report'. It actually means nobody wrote it
+    down, and the dialog has to say which."""
+    status = dict(_HEALTHY_STATUS, containers=[
+        {'Names': 'context-server', 'Status': 'Up 1 hour', 'Labels': ''}])
+    _stub_page(monkeypatch, errors=_errors([]), status=status)
+    monkeypatch.setattr(system_service, 'get_container_detail', lambda *a, **kw: {
+        'ok': True, 'error': None, 'name': 'context-server', 'state': 'running',
+        'health': None, 'description': None, 'description_source': 'unknown',
+        'description_hint': 'Locally built image -- check where it was built from.',
+        'restarts': 0, 'started_at': '', 'finished_at': '', 'exit_code': 0,
+        'oom_killed': False, 'image': 'context-server-context-server',
+        'project': None, 'service': None, 'ports': [], 'mounts': [],
+        'stats': None, 'stats_error': None, 'logs': [], 'log_error': None})
+
+    await user.open('/lab-health-test')
+    await user.should_see('context-server')
+    user.find(marker='container-context-server').click()
+    await asyncio.sleep(0.3)
+    await user.should_see('No description recorded for this container.')
+    await user.should_see('Locally built image -- check where it was built from.')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_vendor_blurb_is_labelled_as_one(user: User, monkeypatch):
+    """A curated sentence and an image's own marketing label are different kinds of
+    claim; presenting them identically overstates how much anyone here knows."""
+    status = dict(_HEALTHY_STATUS, containers=[
+        {'Names': 'someapp', 'Status': 'Up 1 hour', 'Labels': ''}])
+    _stub_page(monkeypatch, errors=_errors([]), status=status)
+    monkeypatch.setattr(system_service, 'get_container_detail', lambda *a, **kw: {
+        'ok': True, 'error': None, 'name': 'someapp', 'state': 'running', 'health': None,
+        'description': 'The best app for doing things.', 'description_source': 'image label',
+        'description_hint': None,
+        'restarts': 0, 'started_at': '', 'finished_at': '', 'exit_code': 0,
+        'oom_killed': False, 'image': 'vendor/someapp:1', 'project': None, 'service': None,
+        'ports': [], 'mounts': [], 'stats': None, 'stats_error': None,
+        'logs': [], 'log_error': None})
+
+    await user.open('/lab-health-test')
+    await user.should_see('someapp')
+    user.find(marker='container-someapp').click()
+    await asyncio.sleep(0.3)
+    await user.should_see("from the image's own label, not written for this host")

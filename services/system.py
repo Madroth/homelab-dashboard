@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import time
+from services import container_catalog
 
 DAEMON_LOG_FILE = '/home/linuxbox/projects/media-curator/daemon.log'
 
@@ -774,8 +775,18 @@ def get_container_detail(name: str, log_lines: int = 60) -> dict:
     mounts = [f"{m.get('Source', '')} -> {m.get('Destination', '')}"
               for m in info.get('Mounts') or []]
 
+    # What this container IS, which docker inspect cannot answer -- see
+    # services/container_catalog.py. Carries its own provenance because a curated
+    # sentence and a vendor's own blurb are different kinds of claim.
+    description = container_catalog.describe(
+        name, config.get('Image', ''),
+        labels.get('org.opencontainers.image.description'))
+
     detail = {
         'ok': True, 'error': None, 'name': name,
+        'description': description['text'],
+        'description_source': description['source'],
+        'description_hint': description.get('hint'),
         'state': state.get('Status', 'unknown'),
         # A container's own healthcheck is a different question from "is the process
         # running", and only some images define one. None means "not declared", which

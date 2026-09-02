@@ -679,6 +679,36 @@ def build():
                 dialog.open()
                 return
 
+            # What this thing IS, before any of the numbers about it. An image name
+            # is not an answer to "what is this" -- see services/container_catalog.py.
+            # An undescribed container renders as an explicit gap with what would
+            # settle it, never as blank space, because blank reads as "nothing to
+            # report" when it actually means "nobody has written this down".
+            if detail.get('description'):
+                with ui.row().classes('items-start no-wrap w-full').style(
+                        f'gap:8px;padding:9px 11px;border-radius:8px;margin-bottom:12px;'
+                        f'background:rgba(255,255,255,0.03);border:1px solid {theme.BORDER}'):
+                    ui.icon('fa-solid fa-circle-info').style(
+                        f'color:{theme.TEXT_DIM};font-size:11px;margin-top:2px')
+                    with ui.column().style('gap:2px'):
+                        ui.label(detail['description']).style(
+                            f'font-size:11.5px;color:{theme.TEXT_MUTED};line-height:1.5')
+                        if detail.get('description_source') == 'image label':
+                            ui.label("from the image's own label, not written for this host").style(
+                                f'font-size:10px;color:{theme.TEXT_DIM};font-style:italic')
+            else:
+                with ui.row().classes('items-start no-wrap w-full').style(
+                        f'gap:8px;padding:9px 11px;border-radius:8px;margin-bottom:12px;'
+                        f'background:rgba(255,255,255,0.03);border:1px dashed {theme.BORDER}'):
+                    ui.icon('fa-solid fa-circle-question').style(
+                        f'color:{theme.AMBER};font-size:11px;margin-top:2px')
+                    with ui.column().style('gap:2px'):
+                        ui.label('No description recorded for this container.').style(
+                            f'font-size:11.5px;color:{theme.TEXT_MUTED};line-height:1.5')
+                        ui.label(detail.get('description_hint')
+                                 or 'Add one to BY_IMAGE in services/container_catalog.py.').style(
+                            f'font-size:10px;color:{theme.TEXT_DIM};line-height:1.5')
+
             running = detail['state'] == 'running'
             state_color = theme.GREEN if running else theme.RED
             # A declared healthcheck disagreeing with 'running' is the interesting case;
