@@ -124,7 +124,7 @@ def _clock(ts: float) -> str:
 
 def build():
     state = {'status': None, 'logs': [], 'errors': None, 'units': None,
-             'status_error': None, 'resources': None, 'query': '', 'reach': None, 'smart': None}
+             'status_error': None, 'resources': None, 'query': '', 'reach': None, 'smart': None, 'backups': None, 'hosts': None}
 
     # ---------- shared chrome ----------
 
@@ -184,6 +184,7 @@ def build():
     stamp_network = _stamp_for('reach', 120.0)
     # smartd polls on its own slow schedule, so this reader is cheap and rarely changes.
     stamp_smart = _stamp_for('smart', 900.0)
+    stamp_backups = _stamp_for('backups', 900.0)
 
     # F7. With 54 containers and 101 units, scrolling is not navigation.
     #
@@ -263,15 +264,22 @@ def build():
         smart = state['smart']
         bad_disks = [d['label'] for d in (smart or {}).get('disks', [])
                      if d.get('ok') and d.get('failing')]
+        # Deduped against failed units: plane-backup.service is already named there, and
+        # saying it twice in one sentence reads as two problems.
+        failed_units = {u['origin'] for u in failed}
+        bad_backups = [j['unit'] for j in (state['backups'] or {}).get('jobs', [])
+                       if not j['ok'] and not j['never_ran'] and j['unit'] not in failed_units]
 
         if errors is None:
             tone, title, detail = theme.TEXT_MUTED, 'Reading…', 'Collecting errors, units and containers.'
         elif unreadable:
             tone, title = theme.TEXT_MUTED, 'Cannot tell'
             detail = f"A source did not answer — {errors['error']}. What is shown is incomplete."
-        elif failed or down or bad_disks:
+        elif failed or down or bad_disks or bad_backups:
             tone, title = theme.RED, 'Something is broken'
             parts = []
+            if bad_backups:
+                parts.append('backup failed: ' + ', '.join(bad_backups[:2]))
             if bad_disks:
                 parts.append('SMART errors on ' + ', '.join(bad_disks[:2]))
             if failed:
@@ -621,6 +629,113 @@ def build():
         elif len(all_units) > len(shown):
             ui.label(f'{len(all_units) - len(shown)} more units not shown').style(
                 f'font-size:10.5px;color:{theme.TEXT_DIM};margin-top:8px')
+
+    # ---------- backups (F15) and remote hosts (F16) ----------
+
+    @ui.refreshable
+    def render_backups():
+        backups = state['backups']
+        if backups is None:
+            ui.element('div').classes('nq-skel').style(
+                'height:70px;border-radius:9px;background:rgba(255,255,255,0.04);width:100%')
+            return
+        if backups['error']:
+            _unknown_box(f"Could not list backup jobs — {backups['error']}")
+        if not backups['jobs']:
+            ui.label('No backup units found on this host.').style(
+                f'font-size:11.5px;color:{theme.TEXT_MUTED}')
+            return
+
+        with ui.column().style('gap:6px;width:100%'):
+            for job in backups['jobs']:
+                if job['never_ran']:
+                    tone, verdict = theme.AMBER, 'never run'
+                elif job['ok']:
+                    tone, verdict = theme.GREEN, 'succeeded'
+                else:
+                    tone, verdict = theme.RED, f"failed ({job['result']})"
+                with ui.column().style(
+                        f'gap:4px;padding:10px 14px;border-radius:9px;width:100%;'
+                        f'background:{theme.CARD_BG};border:1px solid '
+                        + (theme.RED if not job['ok'] and not job['never_ran'] else theme.BORDER)):
+                    with ui.row().classes('items-center no-wrap w-full').style('gap:10px'):
+                        ui.element('div').style(
+                            f'width:7px;height:7px;border-radius:50%;background:{tone};flex:none')
+                        ui.label(job['description']).style(
+                            f'font-size:11.5px;font-weight:600;color:{theme.TEXT};'
+                            f'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;'
+                            f'white-space:nowrap')
+                        ui.label(verdict).style(
+                            f'font-size:10.5px;font-weight:700;color:{tone};flex:none')
+                    when = (f"last run {_ago(job['last_run'])}" if job['last_run']
+                            else 'has never run')
+                    nxt = (f" · next {_ago(job['next_run']).replace(' ago', ' from now')}"
+                           if job['next_run'] else '')
+                    ui.label(f"{job['unit']} — {when}{nxt}").style(
+                        f"font-size:10px;color:{theme.TEXT_DIM};"
+                        f"font-family:'JetBrains Mono',monospace")
+                    if job.get('odd_exit'):
+                        ui.label(f"systemd recorded success though the main process exited "
+                                 f"{job['exit_status']}.").style(
+                            f'font-size:10px;color:{theme.AMBER}')
+                    if job.get('last_words'):
+                        # systemd knows when and whether. What was written and how big is
+                        # only ever what the job itself chose to say.
+                        ui.label(job['last_words'][:300]).style(
+                            f"font-size:10px;color:{theme.TEXT_MUTED};white-space:pre-wrap;"
+                            f"font-family:'JetBrains Mono',monospace;user-select:text")
+
+            ui.label('Sizes and contents are whatever each job reports for itself — systemd '
+                     'records when a job ran and whether it succeeded, never what it wrote.').style(
+                f'font-size:10.5px;color:{theme.TEXT_DIM};margin-top:2px')
+
+    @ui.refreshable
+    def render_hosts():
+        hosts = state['hosts']
+        if hosts is None:
+            ui.element('div').classes('nq-skel').style(
+                'height:60px;border-radius:9px;background:rgba(255,255,255,0.04);width:100%')
+            return
+        if not hosts['ok']:
+            _unknown_box(f"Could not read the host inventory — {hosts['error']}")
+            return
+
+        with ui.column().style('gap:5px;width:100%'):
+            for host in hosts['hosts']:
+                if host['off_limits']:
+                    tone, state_text = theme.PURPLE, 'off-limits by policy'
+                elif host['online'] is True:
+                    tone, state_text = theme.GREEN, 'on the tailnet now'
+                elif host['online'] is False:
+                    tone, state_text = theme.TEXT_DIM, 'not on the tailnet now'
+                else:
+                    # Never "offline". This box has no way to ask, and saying "offline"
+                    # would be a measurement we did not take.
+                    tone, state_text = theme.TEXT_MUTED, 'no way to check from here'
+                with ui.row().classes('items-center no-wrap w-full').style(
+                        f'gap:12px;padding:8px 14px;border-radius:8px;'
+                        f'background:{theme.CARD_BG};border:1px solid {theme.BORDER}'):
+                    ui.element('div').style(
+                        f'width:6px;height:6px;border-radius:50%;background:{tone};flex:none')
+                    ui.label(host['name']).style(
+                        f'font-size:11.5px;font-weight:600;color:{theme.TEXT};flex:none;width:150px')
+                    ui.label(host['detail']).style(
+                        f'flex:1;min-width:0;font-size:10.5px;color:{theme.TEXT_MUTED};'
+                        f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap')
+                    ui.label(state_text).style(
+                        f'font-size:10px;color:{tone};flex:none;width:150px;text-align:right')
+
+            age = int(hosts['age_days'])
+            note = (f'Declared in HARDWARE.md, last edited {age} day(s) ago. Everything here '
+                    f'is a claim with a date on it, not a measurement — except tailnet '
+                    f'reachability, which is checked.')
+            ui.label(note).style(
+                f'font-size:10.5px;color:'
+                + (theme.AMBER if hosts['stale'] else theme.TEXT_DIM) + ';margin-top:2px')
+            if hosts['stale']:
+                ui.label(f'That is past the {system.HARDWARE_REVIEW_MAX_AGE_DAYS}-day review '
+                         f'window — treat it as unverified.').style(
+                    f'font-size:10.5px;color:{theme.AMBER}')
 
     # ---------- disk health / SMART (F13) ----------
 
@@ -1296,6 +1411,19 @@ def build():
             state['logs'] = logs
             render_logs.refresh()
 
+    async def refresh_backups():
+        backups = await run.io_bound(system.get_backups)
+        hosts = await run.io_bound(system.get_remote_hosts)
+        if backups is None or hosts is None:
+            return
+        if client_alive():
+            state['backups'] = backups
+            state['hosts'] = hosts
+            render_backups.refresh()
+            render_hosts.refresh()
+            render_verdict.refresh()
+            stamp_backups.refresh()
+
     async def refresh_smart():
         smart = await run.io_bound(system.get_disk_health)
         if smart is None:
@@ -1345,6 +1473,7 @@ def build():
         await refresh_status()
         await refresh_network()
         await refresh_smart()
+        await refresh_backups()
 
     # ---------- AI context ----------
 
@@ -1440,6 +1569,12 @@ def build():
         _section_label('DISK HEALTH — SMART', stamp=stamp_smart)
         render_smart()
 
+        _section_label('BACKUPS', stamp=stamp_backups)
+        render_backups()
+
+        _section_label('REMOTE HOSTS')
+        render_hosts()
+
         with ui.row().classes('items-center no-wrap').style('margin:28px 0 12px;gap:10px'):
             ui.label('DAEMON LOG (LAST 100 LINES)').style(
                 f'font-size:11.5px;font-weight:700;letter-spacing:0.5px;color:{theme.TEXT_DIM}')
@@ -1453,18 +1588,20 @@ def build():
     ui.timer(0.05, refresh_logs, once=True)
     ui.timer(0.2, refresh_network, once=True)
     ui.timer(0.3, refresh_smart, once=True)
+    ui.timer(0.4, refresh_backups, once=True)
     ui.timer(15.0, refresh_status)
     ui.timer(15.0, refresh_resources)
     ui.timer(30.0, refresh_errors)
     # Slower than the rest: every probe is a network round trip with a timeout budget.
     ui.timer(60.0, refresh_network)
     ui.timer(600.0, refresh_smart)
+    ui.timer(600.0, refresh_backups)
 
     def tick_stamps():
         if not client_alive():
             return
         for stamp in (stamp_errors, stamp_units, stamp_containers, stamp_resources,
-                      stamp_network, stamp_smart):
+                      stamp_network, stamp_smart, stamp_backups):
             stamp.refresh()
 
     ui.timer(5.0, tick_stamps)

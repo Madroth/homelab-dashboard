@@ -846,6 +846,187 @@ def get_disk_health() -> dict:
             'error': '; '.join(problems) if problems else None}
 
 
+# F15. Backups, read from systemd rather than from a self-report each job would have to
+# be taught to write. systemd already records what we need -- when a unit last ran, whether
+# it succeeded, how long it took, when its timer fires next -- and a convention nobody has
+# to adopt cannot fall out of date. What systemd does NOT know is what a run actually wrote
+# or how big it was, so this does not claim to: the job's own last journal line is shown as
+# its self-report, whatever form the job chose, and nothing is inferred beyond it.
+#
+# QNAP2 is never contacted here. The backup job is the only sanctioned thing that talks to
+# it (ADR 22); reading systemd's record of whether that job succeeded touches nothing.
+_BACKUP_UNIT_HINT = 'backup'
+
+
+def _unit_props(unit: str, manager: str, props: list[str]) -> dict:
+    ok, out = _run(['systemctl', f'--{manager}', 'show', unit, '--timestamp=unix']
+                   + [f'--property={p}' for p in props], timeout=10)
+    if not ok:
+        return {}
+    values = {}
+    for line in (out or '').splitlines():
+        key, _, value = line.partition('=')
+        if key:
+            values[key] = value
+    return values
+
+
+def _systemd_stamp(raw: str) -> float | None:
+    """Parse `@<epoch seconds>`, which is what --timestamp=unix emits.
+
+    Without that flag systemd prints "Wed 2026-09-09 20:18:56 EDT", which would need
+    locale- and timezone-dependent parsing to read. An unset timestamp comes back empty
+    or as "n/a", and both must read as "never", not as the epoch.
+    """
+    if not raw:
+        return None
+    raw = raw.strip()
+    if not raw.startswith('@'):
+        return None
+    try:
+        seconds = float(raw[1:])
+    except ValueError:
+        return None
+    return seconds if seconds > 0 else None
+
+
+def get_backups() -> dict:
+    """Every backup unit this host runs, with its last result and next run."""
+    jobs, problems = [], []
+    for manager in ('user', 'system'):
+        ok, out = _run(['systemctl', f'--{manager}', 'list-units', '--type=service',
+                        '--all', '--output=json', '--no-pager'], timeout=20)
+        if not ok:
+            problems.append(f'{manager}: {out}')
+            continue
+        try:
+            units = json.loads(out or '[]')
+        except json.JSONDecodeError as e:
+            problems.append(f'{manager}: unreadable systemctl output ({e})')
+            continue
+
+        for row in units:
+            name = row.get('unit', '')
+            if _BACKUP_UNIT_HINT not in name.lower() or not name.endswith('.service'):
+                continue
+            props = _unit_props(name, manager, [
+                'Description', 'Result', 'ExecMainStatus', 'NRestarts',
+                'ActiveEnterTimestampMonotonic', 'InactiveEnterTimestampMonotonic',
+                'ExecMainStartTimestamp', 'ExecMainExitTimestamp',
+                'ExecMainStartTimestampMonotonic'])
+            timer_props = _unit_props(name[:-len('.service')] + '.timer', manager,
+                                      ['NextElapseUSecRealtime', 'LastTriggerUSec'])
+
+            last_run = _systemd_stamp(timer_props.get('LastTriggerUSec'))
+            next_run = _systemd_stamp(timer_props.get('NextElapseUSecRealtime'))
+            result = props.get('Result') or 'unknown'
+            exit_status = props.get('ExecMainStatus')
+
+            # A job that has never run at all and one that ran and failed are different
+            # problems: the first is a timer that never fired, the second is a broken job.
+            never_ran = last_run is None and not _systemd_stamp(
+                props.get('ExecMainStartTimestamp'))
+            # systemd's own Result is the verdict, not ExecMainStatus. gamelab-backup@wotlk
+            # reports Result=success with ExecMainStatus=1 -- a oneshot whose last ExecStart
+            # is not its main process, or a configured SuccessExitStatus. Requiring both to
+            # agree invented a failure systemd does not see. The disagreement is still worth
+            # showing, so it is reported as a note rather than swallowed or promoted.
+            succeeded = result == 'success'
+            odd_exit = (succeeded and exit_status not in ('0', '', None))
+
+            log_ok, log_out = _run(['journalctl', f'--{manager}', '-u', name, '-n', '3',
+                                    '--no-pager', '--output=cat'], timeout=10)
+            jobs.append({
+                'unit': name, 'manager': manager,
+                'description': props.get('Description') or name,
+                'ok': succeeded and not never_ran,
+                'never_ran': never_ran,
+                'result': result, 'exit_status': exit_status, 'odd_exit': odd_exit,
+                'last_run': last_run, 'next_run': next_run,
+                # The job's own words about what it did. systemd cannot know what was
+                # written or how large it was; if the job does not say, nobody knows.
+                'last_words': (log_out or '').strip() if log_ok else None,
+                'log_error': None if log_ok else log_out,
+            })
+
+    jobs.sort(key=lambda j: (j['ok'], j['unit']))
+    return {'ok': not problems, 'jobs': jobs, 'read_at': time.time(),
+            'error': '; '.join(problems) if problems else None}
+
+
+# F16. Remote hosts. This box cannot enumerate them -- nothing here can prove what a
+# Windows workstation across the room is doing -- so everything below is a *claim* with a
+# date on it, read from ~/HomeLab/HARDWARE.md, which is the canonical inventory. Copying
+# that list into this repo would create a second source of truth that drifts; reading it
+# means the dashboard is wrong exactly when the doc is, and says when it was last touched.
+#
+# Where a host is on the tailnet, F14's peer list upgrades the claim to a fact for the one
+# narrow question of reachability. Everything else stays a claim.
+HARDWARE_DOC = os.path.expanduser('~/HomeLab/HARDWARE.md')
+HARDWARE_REVIEW_MAX_AGE_DAYS = 90     # matches MONITORING-COVERAGE.json's verify_max_age_days
+
+def _squash(name: str) -> str:
+    return re.sub(r'[^a-z0-9]', '', name.lower())
+
+
+_NODE_HEADING = re.compile(r'^###\s+(Node\s+\w+|QNAP\d)\s*[—-]\s*(.+?)\s*$')
+
+
+def get_remote_hosts() -> dict:
+    """The declared inventory, dated, with tailnet reachability where we have it."""
+    try:
+        with open(HARDWARE_DOC, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.read().splitlines()
+        reviewed_at = os.path.getmtime(HARDWARE_DOC)
+    except OSError as e:
+        return {'ok': False, 'hosts': [], 'error': f'cannot read {HARDWARE_DOC} ({e})'}
+
+    peers = {}
+    ts = get_tailscale()
+    if ts.get('ok'):
+        for p in ts['peers']:
+            peers[p['host'].lower()] = p
+            peers[_squash(p['host'])] = p
+
+    hosts = []
+    for line in lines:
+        m = _NODE_HEADING.match(line)
+        if not m:
+            continue
+        label, rest = m.group(1), m.group(2)
+        offlimits = 'OFF-LIMITS' in rest.upper()
+        # The heading carries the nickname in quotes when it has one.
+        name_match = re.search(r'"([^"]+)"', rest)
+        if name_match:
+            name = name_match.group(1)
+        else:
+            # "Surface Pro 8 (Mobile Engineering Client)" -> "Surface Pro 8"
+            name = re.sub(r'\s*\(.*$', '', rest.split('—')[0]).strip()
+        # Tailscale hostnames drop spacing and case, and often drop trailing model words
+        # too: the peer calling itself "steamdeck" is this doc's "Steam Deck OLED". Exact
+        # first, then a prefix match long enough not to collide by accident.
+        squashed = _squash(name)
+        peer = peers.get(name.lower()) or peers.get(squashed)
+        if peer is None:
+            for key, candidate in peers.items():
+                if len(key) >= 5 and (squashed.startswith(key) or key.startswith(squashed)):
+                    peer = candidate
+                    break
+        hosts.append({
+            'label': label, 'name': name, 'detail': rest,
+            'off_limits': offlimits,
+            # None means "we have no way to ask", which is not the same as offline.
+            'online': None if (offlimits or peer is None) else peer['online'],
+            'on_tailnet': peer is not None and not offlimits,
+        })
+
+    age_days = (time.time() - reviewed_at) / 86400
+    return {'ok': True, 'hosts': hosts, 'error': None, 'read_at': time.time(),
+            'reviewed_at': reviewed_at, 'age_days': age_days,
+            'stale': age_days > HARDWARE_REVIEW_MAX_AGE_DAYS,
+            'source': HARDWARE_DOC}
+
+
 def get_top_processes(limit: int = 8) -> dict:
     """Top CPU consumers -- the answer to 'what is eating this'."""
     ok, out = _run(['ps', '-eo', 'pid,pcpu,pmem,rss,comm', '--sort=-pcpu', '--no-headers'])

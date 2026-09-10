@@ -170,8 +170,27 @@ _HEALTHY_SMART = {
 }
 
 
+_HEALTHY_BACKUPS = {
+    'ok': True, 'error': None, 'read_at': _NOW,
+    'jobs': [{'unit': 'sessions-backup.service', 'manager': 'user',
+              'description': 'Back up the session store to QNAP1', 'ok': True,
+              'never_ran': False, 'result': 'success', 'exit_status': '0',
+              'odd_exit': False, 'last_run': _NOW - 3600, 'next_run': _NOW + 3600,
+              'last_words': 'wrote 12 files', 'log_error': None}],
+}
+
+_HEALTHY_HOSTS = {
+    'ok': True, 'error': None, 'read_at': _NOW, 'reviewed_at': _NOW - 86400,
+    'age_days': 1.0, 'stale': False, 'source': '/home/x/HARDWARE.md',
+    'hosts': [{'label': 'Node C', 'name': 'Omega', 'detail': 'Main workstation',
+               'off_limits': False, 'online': True, 'on_tailnet': True},
+              {'label': 'QNAP2', 'name': 'Ellishomenas02', 'detail': 'Backup Vault',
+               'off_limits': True, 'online': None, 'on_tailnet': False}],
+}
+
+
 def _stub_page(monkeypatch, *, errors, units=None, status=None, resources=None, reach=None,
-               smart=None):
+               smart=None, backups=None, hosts=None):
     monkeypatch.setattr(system_service, 'get_errors', lambda *a, **kw: errors)
     monkeypatch.setattr(system_service, 'get_units',
                         lambda *a, **kw: units or {'ok': True, 'units': [], 'error': None,
@@ -190,6 +209,10 @@ def _stub_page(monkeypatch, *, errors, units=None, status=None, resources=None, 
                         lambda *a, **kw: reach or _HEALTHY_REACH)
     monkeypatch.setattr(system_service, 'get_disk_health',
                         lambda *a, **kw: smart or _HEALTHY_SMART)
+    monkeypatch.setattr(system_service, 'get_backups',
+                        lambda *a, **kw: backups or _HEALTHY_BACKUPS)
+    monkeypatch.setattr(system_service, 'get_remote_hosts',
+                        lambda *a, **kw: hosts or _HEALTHY_HOSTS)
     monkeypatch.setattr(system_service, 'get_uptime',
                         lambda *a, **kw: {'ok': True, 'error': None, 'seconds': 486000.0,
                                           'booted_at': _NOW - 486000.0})
@@ -1174,3 +1197,77 @@ async def test_unchecked_containers_do_not_rank_a_project_as_broken(user: User, 
     await user.open('/lab-health-test')
     await user.should_see('1 down')
     await user.should_see('2 running, unchecked')
+
+
+# ---------- F15 backups / F16 remote hosts ----------
+
+def test_systemd_timestamps_parse_only_in_unix_form():
+    """systemd prints "Wed 2026-09-09 20:18:56 EDT" unless asked for --timestamp=unix.
+    The human form must read as 'never' rather than being coerced into a wrong number."""
+    assert system_service._systemd_stamp('@1788999536') == 1788999536.0
+    assert system_service._systemd_stamp('Wed 2026-09-09 20:18:56 EDT') is None
+    assert system_service._systemd_stamp('') is None
+    assert system_service._systemd_stamp('@0') is None       # unset, not the epoch
+    assert system_service._systemd_stamp('n/a') is None
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_failed_backup_reaches_the_verdict(user: User, monkeypatch):
+    backups = dict(_HEALTHY_BACKUPS, jobs=[
+        {'unit': 'plane-backup.service', 'manager': 'user', 'description': 'Plane Backup',
+         'ok': False, 'never_ran': False, 'result': 'exit-code', 'exit_status': '1',
+         'odd_exit': False, 'last_run': _NOW - 7200, 'next_run': _NOW + 7200,
+         'last_words': 'could not resolve qnap2', 'log_error': None}])
+    _stub_page(monkeypatch, errors=_errors([]), backups=backups)
+    await user.open('/lab-health-test')
+    await user.should_see('Something is broken')
+    await user.should_see('backup failed: plane-backup.service')
+    await user.should_see('could not resolve qnap2')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_failed_backup_is_not_counted_twice_with_its_failed_unit(user: User,
+                                                                        monkeypatch):
+    """plane-backup.service appears both as a failed unit and as a failed backup. Naming
+    it in both halves of one sentence reads as two separate problems."""
+    backups = dict(_HEALTHY_BACKUPS, jobs=[
+        {'unit': 'plane-backup.service', 'manager': 'user', 'description': 'Plane Backup',
+         'ok': False, 'never_ran': False, 'result': 'exit-code', 'exit_status': '1',
+         'odd_exit': False, 'last_run': _NOW, 'next_run': None, 'last_words': None,
+         'log_error': None}])
+    _stub_page(monkeypatch, backups=backups, errors=_errors([
+        {'source': 'unit', 'origin': 'plane-backup.service', 'at': _NOW, 'count': 1,
+         'first_at': _NOW, 'severity': 'critical', 'message': 'failed state',
+         'detail': {'manager': 'user', 'unit': 'plane-backup.service'}}]))
+    await user.open('/lab-health-test')
+    await user.should_see('Something is broken')
+    await user.should_not_see('backup failed: plane-backup.service')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_host_we_cannot_reach_is_not_called_offline(user: User, monkeypatch):
+    """"Offline" is a measurement. For a host this box cannot ask, we did not take it."""
+    hosts = dict(_HEALTHY_HOSTS, hosts=[
+        {'label': 'Node G', 'name': 'Media Box', 'detail': 'Remote Windows box',
+         'off_limits': False, 'online': None, 'on_tailnet': False}])
+    _stub_page(monkeypatch, errors=_errors([]), hosts=hosts)
+    await user.open('/lab-health-test')
+    await user.should_see('no way to check from here')
+    await user.should_not_see('not on the tailnet now')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_qnap2_renders_as_off_limits_never_as_unknown(user: User, monkeypatch):
+    """ADR 22. It must be visibly a policy decision, not a gap in coverage somebody might
+    helpfully close by adding a probe."""
+    _stub_page(monkeypatch, errors=_errors([]))
+    await user.open('/lab-health-test')
+    await user.should_see('off-limits by policy')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_stale_inventory_says_it_is_unverified(user: User, monkeypatch):
+    hosts = dict(_HEALTHY_HOSTS, age_days=140.0, stale=True)
+    _stub_page(monkeypatch, errors=_errors([]), hosts=hosts)
+    await user.open('/lab-health-test')
+    await user.should_see('past the 90-day review window')
