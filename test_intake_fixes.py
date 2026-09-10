@@ -205,7 +205,7 @@ def isolated_intake(tmp_path, monkeypatch):
 
     call_log = tmp_path / 'send_calls.log'
 
-    def _delayed_send(article, summary):
+    def _delayed_send(article, summary, project_id=None):
         # A tiny artificial delay so the "sending" transient state is actually
         # observable in the test instead of resolving faster than we can poll.
         import time
@@ -213,7 +213,7 @@ def isolated_intake(tmp_path, monkeypatch):
             f.write(f'called with {article.get("id")}\n')
         time.sleep(0.3)
         return {'created': True, 'verified': True, 'already_existed': False,
-                'issue_id': 'stub-issue-id', 'error': None}
+                'issue_id': 'stub-issue-id', 'project_id': project_id, 'error': None}
 
     monkeypatch.setattr(plane_service, 'send_article_to_plane', _delayed_send)
 
@@ -895,7 +895,7 @@ def _stub_plane(monkeypatch, *, post, get):
     (and the real Plane instance) are never involved."""
     for name in ('PLANE_API_KEY', 'PLANE_API_URL', 'PLANE_WORKSPACE_SLUG', 'PLANE_PROJECT_ID'):
         monkeypatch.setattr(plane_service, name, 'stub')
-    monkeypatch.setattr(plane_service, '_get_or_create_label', lambda: None)
+    monkeypatch.setattr(plane_service, '_get_or_create_label', lambda *a, **kw: None)
     monkeypatch.setattr(plane_service, 'requests',
                         type('R', (), {'post': staticmethod(post), 'get': staticmethod(get),
                                        'RequestException': Exception})())
@@ -906,8 +906,11 @@ def test_send_marks_verified_when_the_issue_reads_back(monkeypatch):
                 post=lambda *a, **kw: _FakeResponse(201, {'id': 'new-issue'}),
                 get=lambda *a, **kw: _FakeResponse(200, {'id': 'new-issue'}))
     result = plane_service.send_article_to_plane({'title': 'T', 'source': 'https://x/'}, 'summary')
+    # project_id is part of the result on purpose: the caller records it so a later
+    # issue_status() asks the project the to-do actually went to. Asking the default one
+    # would read a 404 as "deleted" and orphan a live to-do.
     assert result == {'created': True, 'verified': True, 'already_existed': False,
-                      'issue_id': 'new-issue', 'error': None}
+                      'issue_id': 'new-issue', 'project_id': 'stub', 'error': None}
 
 
 def test_send_keeps_the_issue_id_when_the_read_back_fails(monkeypatch):
@@ -1018,7 +1021,7 @@ async def test_clicking_the_checkmark_clears_a_todo_deleted_in_plane(
     aid = '2026-07-30-235959-new-article.md'
     state_file = isolated_intake['state_file']
     _already_filed_state(state_file, aid)
-    monkeypatch.setattr(plane_service, 'issue_status', lambda _id: 'gone')
+    monkeypatch.setattr(plane_service, 'issue_status', lambda _id, _pid=None: 'gone')
 
     await user.open('/intake-test')
     await user.should_see('New Article')
@@ -1036,7 +1039,7 @@ async def test_checkmark_survives_a_verify_against_a_live_todo(
     aid = '2026-07-30-235959-new-article.md'
     state_file = isolated_intake['state_file']
     _already_filed_state(state_file, aid)
-    monkeypatch.setattr(plane_service, 'issue_status', lambda _id: 'present')
+    monkeypatch.setattr(plane_service, 'issue_status', lambda _id, _pid=None: 'present')
 
     await user.open('/intake-test')
     await user.should_see('New Article')
@@ -1055,7 +1058,7 @@ async def test_an_unreachable_plane_leaves_the_checkmark_alone(
     aid = '2026-07-30-235959-new-article.md'
     state_file = isolated_intake['state_file']
     _already_filed_state(state_file, aid)
-    monkeypatch.setattr(plane_service, 'issue_status', lambda _id: 'unknown')
+    monkeypatch.setattr(plane_service, 'issue_status', lambda _id, _pid=None: 'unknown')
 
     await user.open('/intake-test')
     await user.should_see('New Article')
@@ -1334,3 +1337,107 @@ def test_raw_content_is_lowercased_on_both_paths_because_search_depends_on_it(tm
     assert article['raw_content'] == article['raw_content'].lower()
     # The capitalised word in the body must be findable by the lowered search term.
     assert 'kubernetes at home' in article['raw_content']
+
+
+# ---------- Send to HomeLab: choosing the project ----------
+
+def test_list_projects_fails_closed_rather_than_reporting_none(monkeypatch):
+    """An empty list because Plane did not answer must not look like a workspace with no
+    projects -- the picker would silently offer nothing and the user would conclude there
+    is nowhere to send."""
+    for name in ('PLANE_API_KEY', 'PLANE_API_URL', 'PLANE_WORKSPACE_SLUG', 'PLANE_PROJECT_ID'):
+        monkeypatch.setattr(plane_service, name, 'stub')
+
+    def _boom(*a, **kw):
+        raise plane_service.requests.RequestException('connection refused')
+    monkeypatch.setattr(plane_service.requests, 'get', _boom)
+
+    out = plane_service.list_projects()
+    assert out['ok'] is False
+    assert out['projects'] == []
+    assert 'connection refused' in out['error']
+
+
+def test_list_projects_puts_the_configured_default_first(monkeypatch):
+    for name, value in (('PLANE_API_KEY', 'k'), ('PLANE_API_URL', 'http://p'),
+                        ('PLANE_WORKSPACE_SLUG', 'w'), ('PLANE_PROJECT_ID', 'default-id')):
+        monkeypatch.setattr(plane_service, name, value)
+    monkeypatch.setattr(plane_service, 'requests', type('R', (), {
+        'get': staticmethod(lambda *a, **kw: _FakeResponse(200, {'results': [
+            {'id': 'zeta', 'name': 'Zeta'},
+            {'id': 'default-id', 'name': 'Homelab'},
+            {'id': 'alpha', 'name': 'Alpha'}]})),
+        'RequestException': Exception})())
+
+    out = plane_service.list_projects()
+    assert out['ok'] is True
+    assert out['projects'][0]['id'] == 'default-id'
+    assert [p['name'] for p in out['projects'][1:]] == ['Alpha', 'Zeta']
+
+
+def test_a_send_names_the_project_it_landed_in(monkeypatch):
+    """Without this the caller cannot record where the to-do went, and the re-check below
+    has no way to ask the right project."""
+    _stub_plane(monkeypatch,
+                post=lambda *a, **kw: _FakeResponse(201, {'id': 'new-issue'}),
+                get=lambda *a, **kw: _FakeResponse(200, {'id': 'new-issue'}))
+    result = plane_service.send_article_to_plane(
+        {'title': 'T', 'source': 'https://x/'}, 'summary', project_id='other-project')
+    assert result['project_id'] == 'other-project'
+
+
+def test_issue_status_asks_the_project_it_is_given(monkeypatch):
+    """The trap this guards. issue_status() is allowed to CLEAR the article's only link to
+    its to-do when it reads 'gone'. An issue filed in another project answers 404 from the
+    default one -- indistinguishable from deleted -- so asking the wrong project would
+    orphan a live to-do and mark the article unsent."""
+    for name, value in (('PLANE_API_KEY', 'k'), ('PLANE_API_URL', 'http://p'),
+                        ('PLANE_WORKSPACE_SLUG', 'w'), ('PLANE_PROJECT_ID', 'default-id')):
+        monkeypatch.setattr(plane_service, name, value)
+    asked = []
+
+    def _get(url, **kw):
+        asked.append(url)
+        return _FakeResponse(200, {'id': 'issue-1'})
+    monkeypatch.setattr(plane_service, 'requests',
+                        type('R', (), {'get': staticmethod(_get),
+                                       'RequestException': Exception})())
+
+    assert plane_service.issue_status('issue-1', 'other-project') == 'present'
+    assert '/projects/other-project/' in asked[-1]
+    assert '/projects/default-id/' not in asked[-1]
+
+    plane_service.issue_status('issue-1')
+    assert '/projects/default-id/' in asked[-1]      # None still means the default
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_sending_records_which_project_the_todo_went_to(user: User, isolated_intake,
+                                                              monkeypatch):
+    """End to end: what the send returns has to reach intake_state, or the re-check will
+    ask the default project about an issue that is not in it."""
+    aid = '2026-07-30-235959-new-article.md'
+    state_file = isolated_intake['state_file']
+
+    monkeypatch.setattr(plane_service, 'send_article_to_plane',
+                        lambda article, summary, project_id=None: {
+                            'created': True, 'verified': True, 'already_existed': False,
+                            'issue_id': 'issue-9', 'project_id': 'chosen-project',
+                            'error': None})
+
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    user.find(marker=f'send-icon-{aid}').click()
+
+    def _recorded_project():
+        # The file does not exist until the first write, so tolerate its absence rather
+        # than racing it.
+        if not state_file.exists():
+            return None
+        return json.loads(state_file.read_text()).get('articles', {}).get(aid, {}).get(
+            'plane_project_id')
+
+    recorded = await _wait_until(lambda: _recorded_project() == 'chosen-project')
+    assert recorded, (
+        f'project not recorded: '
+        f'{state_file.read_text() if state_file.exists() else "(no state file)"!r}')

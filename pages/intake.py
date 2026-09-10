@@ -178,6 +178,12 @@ def build():
         'focused_id': None, 'articles_loaded': False, 'sending_ids': set(), 'confirming_ids': set(),
         'verifying_ids': set(),
         'thread_counts': {},
+        # Where the next Send to HomeLab lands. None means the project configured in
+        # .env; the picker fills it in. Chosen once and reused, because sending a run of
+        # related articles to the same project is the normal case and re-picking each
+        # time would be the annoying one.
+        'plane_project_id': None,
+        'plane_projects': None,
     }
     # Populated by render_tag_dropdown() each time it (re)builds; lets select_tag()
     # restyle a single row's checked-state in place instead of refreshing the whole
@@ -488,7 +494,8 @@ def build():
         try:
             data = await run.io_bound(intake.get_article, aid)
             summary = (data.get('summary') if data else '') or art.get('why_it_matters') or art.get('snippet') or ''
-            result = await run.io_bound(plane.send_article_to_plane, art, summary)
+            result = await run.io_bound(plane.send_article_to_plane, art, summary,
+                                        state.get('plane_project_id'))
         except Exception as e:  # noqa: BLE001 -- see below
             # Anything escaping here would skip every refresh and toast past this point,
             # leaving the row's spinner turning forever with the reason only in the service
@@ -510,10 +517,12 @@ def build():
             # the Plane to-do was really created, so local state must reflect that even if
             # the tab closes mid-request; only the in-memory patch/refresh needs a live client.
             await run.io_bound(intake_state.set_article_state, aid, read=True, archived=True,
-                                plane_issue_id=result['issue_id'])
+                                plane_issue_id=result['issue_id'],
+                                plane_project_id=result.get('project_id'))
             if client_alive(client):
                 _apply_workflow_change(aid, read=True, archived=True,
-                                        plane_issue_id=result['issue_id'])
+                                        plane_issue_id=result['issue_id'],
+                                        plane_project_id=result.get('project_id'))
                 render_articles.refresh()
                 render_folder_dropdown.refresh()
                 render_header.refresh()
@@ -565,15 +574,20 @@ def build():
         state['verifying_ids'].add(aid)
         _refresh_send_control(aid)
         try:
-            status = await run.io_bound(plane.issue_status, issue_id)
+            # The recorded project, not the configured default. This call is allowed to
+            # clear plane_issue_id, and an issue in another project 404s from the default
+            # one -- asking the wrong project would read a live to-do as deleted.
+            status = await run.io_bound(plane.issue_status, issue_id,
+                                        _wf(aid).get('plane_project_id'))
         finally:
             state['verifying_ids'].discard(aid)
         if status == 'gone':
             # Persist unconditionally, then patch in memory only if the tab is still
             # there -- mirrors send_to_homelab's split for the same reason.
-            await run.io_bound(intake_state.set_article_state, aid, plane_issue_id=None)
+            await run.io_bound(intake_state.set_article_state, aid,
+                               plane_issue_id=None, plane_project_id=None)
             if client_alive(client):
-                _apply_workflow_change(aid, plane_issue_id=None)
+                _apply_workflow_change(aid, plane_issue_id=None, plane_project_id=None)
         if not client_alive(client):
             return
         _refresh_send_control(aid)
@@ -1050,6 +1064,55 @@ def build():
     # ---------- rendering: header ----------
 
     @ui.refreshable
+    def render_project_picker():
+        """Which Plane project the next Send to HomeLab lands in.
+
+        Fail-closed like everything else here: if Plane did not answer, this says so
+        rather than rendering an empty dropdown that looks like a workspace with no
+        projects. Sending still works in that case -- it falls back to the .env default,
+        which is exactly the behaviour that existed before this picker.
+        """
+        projects = state['plane_projects']
+        if projects is None:
+            ui.label('projects…').style(
+                f'font-size:10.5px;color:{theme.TEXT_DIM};flex:none')
+            return
+        if not projects['ok']:
+            with ui.row().classes('items-center no-wrap').style('gap:5px;flex:none').tooltip(
+                    f"Could not list Plane projects — {projects['error']}. "
+                    f"Sending still works and uses the project configured in .env."):
+                ui.icon('help_outline').style(f'color:{theme.AMBER};font-size:13px')
+                ui.label('default project').style(f'font-size:10.5px;color:{theme.AMBER}')
+            return
+
+        options = {p['id']: p['name'] for p in projects['projects']}
+        if not options:
+            ui.label('no projects').style(f'font-size:10.5px;color:{theme.TEXT_DIM};flex:none')
+            return
+
+        def _pick(e):
+            state['plane_project_id'] = e.value
+            name = options.get(e.value, e.value)
+            ui.notify(f'New to-dos will go to {name}.', type='info')
+
+        current = state['plane_project_id'] or projects['default_id']
+        if current not in options:
+            current = next(iter(options))
+        ui.select(options, value=current, on_change=_pick) \
+            .props('dense outlined options-dense') \
+            .style('font-size:11px;min-width:150px;flex:none') \
+            .tooltip('Where Send to HomeLab files new to-dos') \
+            .mark('plane-project-picker')
+
+    async def load_plane_projects():
+        client = capture_client()
+        result = await run.io_bound(plane.list_projects)
+        if result is None or not client_alive(client):
+            return
+        state['plane_projects'] = result
+        render_project_picker.refresh()
+
+    @ui.refreshable
     def render_header():
         arts = state['articles']
         live_n = len([a for a in arts if not _wf(a['id'])['archived']])
@@ -1066,6 +1129,7 @@ def build():
                 ui.label('Article Intake').style(
                     f'font-size:16px;font-weight:700;color:{theme.TEXT};flex:none;white-space:nowrap')
                 ui.space()
+                render_project_picker()
                 for icon, tip, handler in [
                     ('add_link', 'Add URL — not wired to a backend yet',
                      lambda: ui.notify('Add URL — not wired to a backend yet', type='info')),
@@ -2063,3 +2127,6 @@ def build():
     live_state.register('intake', lambda: ui.timer(0.01, reload_workflow, once=True))
 
     ui.timer(0.05, _initial_load, once=True)
+    # Separate from _initial_load: a slow or unreachable Plane must not hold up the
+    # article list, which is the reason anyone opened this page.
+    ui.timer(0.3, load_plane_projects, once=True)

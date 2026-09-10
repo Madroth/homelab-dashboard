@@ -19,15 +19,42 @@ PLANE_ARTICLE_LABEL = os.getenv('PLANE_ARTICLE_LABEL', 'from-article')
 EXTERNAL_SOURCE = 'homelab-intake'  # paired with the article id as Plane's external_id
 
 
-def _base_url() -> str:
-    return f"{PLANE_API_URL}/workspaces/{PLANE_WORKSPACE_SLUG}/projects/{PLANE_PROJECT_ID}"
+def _base_url(project_id: str | None = None) -> str:
+    return (f"{PLANE_API_URL}/workspaces/{PLANE_WORKSPACE_SLUG}"
+            f"/projects/{project_id or PLANE_PROJECT_ID}")
+
+
+def list_projects() -> dict:
+    """Every project this API key can see, for choosing where a to-do lands.
+
+    Fail-closed like the readers in services/system.py: an empty list because Plane did
+    not answer must not look like a workspace with no projects, or the picker silently
+    offers nothing and the user concludes there is nowhere to send.
+    """
+    if not all([PLANE_API_KEY, PLANE_API_URL, PLANE_WORKSPACE_SLUG]):
+        return {'ok': False, 'projects': [], 'default_id': PLANE_PROJECT_ID,
+                'error': 'Plane is not configured (missing values in homelab-dashboard/.env).'}
+    try:
+        resp = requests.get(f"{PLANE_API_URL}/workspaces/{PLANE_WORKSPACE_SLUG}/projects/",
+                            headers=_headers(), timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        items = data.get('results', data) if isinstance(data, dict) else data
+    except (requests.RequestException, ValueError) as e:
+        return {'ok': False, 'projects': [], 'default_id': PLANE_PROJECT_ID,
+                'error': f'{type(e).__name__}: {e}'}
+
+    projects = [{'id': p.get('id'), 'name': p.get('name') or p.get('identifier') or p.get('id')}
+                for p in items if p.get('id')]
+    projects.sort(key=lambda p: (p['id'] != PLANE_PROJECT_ID, p['name'].lower()))
+    return {'ok': True, 'projects': projects, 'default_id': PLANE_PROJECT_ID, 'error': None}
 
 
 def _headers() -> dict:
     return {'X-Api-Key': PLANE_API_KEY, 'Content-Type': 'application/json'}
 
 
-def _get_or_create_label() -> str | None:
+def _get_or_create_label(project_id: str | None = None) -> str | None:
     """Returns the Plane label ID for PLANE_ARTICLE_LABEL, creating it if missing.
 
     Returns None -- leaving the issue unlabelled -- if the label endpoints are not
@@ -36,7 +63,7 @@ def _get_or_create_label() -> str | None:
     nicety and must not be able to lose the to-do itself.
     """
     try:
-        resp = requests.get(f"{_base_url()}/labels/", headers=_headers(), timeout=15)
+        resp = requests.get(f"{_base_url(project_id)}/labels/", headers=_headers(), timeout=15)
         resp.raise_for_status()
         data = resp.json()
         labels = data.get('results', data) if isinstance(data, dict) else data
@@ -44,7 +71,7 @@ def _get_or_create_label() -> str | None:
             if label.get('name') == PLANE_ARTICLE_LABEL:
                 return label['id']
 
-        resp = requests.post(f"{_base_url()}/labels/", headers=_headers(),
+        resp = requests.post(f"{_base_url(project_id)}/labels/", headers=_headers(),
                               json={'name': PLANE_ARTICLE_LABEL, 'color': '#cba6f7'}, timeout=15)
         resp.raise_for_status()
         return resp.json().get('id')
@@ -52,7 +79,7 @@ def _get_or_create_label() -> str | None:
         return None
 
 
-def send_article_to_plane(article: dict, summary: str) -> dict:
+def send_article_to_plane(article: dict, summary: str, project_id: str | None = None) -> dict:
     """Creates a Plane issue from an article, then reads it back to confirm it exists.
 
     Returns {'created', 'verified', 'issue_id', 'already_existed', 'error'}. `created`
@@ -67,12 +94,14 @@ def send_article_to_plane(article: dict, summary: str) -> dict:
     a second one. That is the only defence against a create whose reply never arrived --
     local state cannot know the difference.
     """
-    if not all([PLANE_API_KEY, PLANE_API_URL, PLANE_WORKSPACE_SLUG, PLANE_PROJECT_ID]):
+    if not all([PLANE_API_KEY, PLANE_API_URL, PLANE_WORKSPACE_SLUG,
+                project_id or PLANE_PROJECT_ID]):
         return {'created': False, 'verified': False, 'issue_id': None, 'already_existed': False,
+                'project_id': project_id or PLANE_PROJECT_ID,
                 'error': 'Plane is not configured (missing values in homelab-dashboard/.env).'}
 
     try:
-        label_id = _get_or_create_label()
+        label_id = _get_or_create_label(project_id)
 
         body = summary or article.get('why_it_matters') or article.get('snippet') or ''
         source = article.get('source') or ''
@@ -96,7 +125,8 @@ def send_article_to_plane(article: dict, summary: str) -> dict:
         if label_id:
             payload['labels'] = [label_id]
 
-        resp = requests.post(f"{_base_url()}/issues/", headers=_headers(), json=payload, timeout=30)
+        resp = requests.post(f"{_base_url(project_id)}/issues/", headers=_headers(),
+                             json=payload, timeout=30)
         if resp.status_code == 409:
             # Already filed under this external_id; the 409 body carries the existing id.
             try:
@@ -108,11 +138,12 @@ def send_article_to_plane(article: dict, summary: str) -> dict:
                 # would leave the article un-ticked and retrying into the same 409
                 # forever, so report it as a real outcome rather than a silent link.
                 return {'created': True, 'already_existed': True, 'issue_id': None,
-                        'verified': False,
+                        'verified': False, 'project_id': project_id or PLANE_PROJECT_ID,
                         'error': 'Plane reports this article is already filed but did not '
                                  'return the issue id, so it could not be linked.'}
             return {'created': True, 'already_existed': True, 'issue_id': existing,
-                    'error': None, 'verified': _issue_exists(existing)}
+                    'error': None, 'project_id': project_id or PLANE_PROJECT_ID,
+                    'verified': _issue_exists(existing, project_id)}
         resp.raise_for_status()
         issue_id = resp.json().get('id')
     except Exception as e:
@@ -120,18 +151,20 @@ def send_article_to_plane(article: dict, summary: str) -> dict:
         # unreadable response raises something else entirely, and letting that escape kills
         # the caller's own error handling -- leaving its spinner running and saying nothing.
         return {'created': False, 'verified': False, 'issue_id': None,
-                'already_existed': False, 'error': f'{type(e).__name__}: {e}'}
+                'already_existed': False, 'project_id': project_id or PLANE_PROJECT_ID,
+                'error': f'{type(e).__name__}: {e}'}
 
     return {'created': True, 'already_existed': False, 'issue_id': issue_id, 'error': None,
-            'verified': _issue_exists(issue_id)}
+            'project_id': project_id or PLANE_PROJECT_ID,
+            'verified': _issue_exists(issue_id, project_id)}
 
 
-def _issue_exists(issue_id: str | None) -> bool:
+def _issue_exists(issue_id: str | None, project_id: str | None = None) -> bool:
     """True if Plane can still hand back the issue we were just told it created."""
-    return issue_status(issue_id) == 'present'
+    return issue_status(issue_id, project_id) == 'present'
 
 
-def issue_status(issue_id: str | None) -> str:
+def issue_status(issue_id: str | None, project_id: str | None = None) -> str:
     """'present' | 'gone' | 'unknown' for an issue id we recorded earlier.
 
     Deliberately three-valued rather than a bool. Confirming a create can collapse
@@ -144,10 +177,16 @@ def issue_status(issue_id: str | None) -> str:
     """
     if not issue_id:
         return 'gone'
-    if not all([PLANE_API_KEY, PLANE_API_URL, PLANE_WORKSPACE_SLUG, PLANE_PROJECT_ID]):
+    if not all([PLANE_API_KEY, PLANE_API_URL, PLANE_WORKSPACE_SLUG,
+                project_id or PLANE_PROJECT_ID]):
         return 'unknown'
+    # The project matters as much as the id. This function is allowed to DELETE the
+    # article's only link to its to-do when it reads 'gone', and an issue that lives in
+    # another project answers 404 from the default one -- indistinguishable from deleted.
+    # Asking the wrong project would orphan a live to-do and mark the article unsent.
     try:
-        resp = requests.get(f"{_base_url()}/issues/{issue_id}/", headers=_headers(), timeout=15)
+        resp = requests.get(f"{_base_url(project_id)}/issues/{issue_id}/",
+                            headers=_headers(), timeout=15)
     except requests.RequestException:
         return 'unknown'
     if resp.status_code == 404:

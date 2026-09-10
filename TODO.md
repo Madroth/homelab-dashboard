@@ -335,7 +335,26 @@
   Doing nothing is also a position, but it should be a chosen one: the constraint currently
   says something the code does not do, which is how the next person gets misled.
 
-- [ ] **`test_media_fixes.py` fails intermittently under host load (found 2026-09-01).** Three
+- [ ] **`test_media_fixes.py` fails intermittently under host load (found 2026-09-01).**
+  **Attempted 2026-09-09 and NOT fixed — read this before trying again.** The obvious
+  hypothesis was NiceGUI's retry budget: `User.should_see` makes 3 attempts with a 0.1s
+  sleep, so 0.3s for an async render to finish, which is a wall-clock assertion by another
+  name. `conftest.py` now raises that default to 30 (override with `NICEGUI_TEST_RETRIES`),
+  which is free on the passing path since both helpers return the moment the assertion
+  holds. **But the evidence does not support it being the mechanism.** Measured with the
+  test process deprioritised (`nice -n 19`) to simulate contention without loading a live
+  game server: retries=3 gave 1 failure in 15 runs, retries=30 gave 1 failure in 21, and a
+  controlled 12-run A/B at each setting produced **zero** failures either way. The change
+  is kept as a defensible removal of a timing cliff, not as a fix.
+
+  Two things for whoever picks this up. The failure was never captured — no run that failed
+  had its output saved, so the actual mechanism is still unknown, and *that* is the thing to
+  fix first: make a failing run record what it saw. And I repeated the exact mistake this
+  item warns about, concluding "reproduced it" from a single failure in three runs, which
+  the later 12-run batch then contradicted. A/B at least a dozen runs per side before
+  believing anything here.
+
+  *Original finding:* Three
   UI-timing tests — `test_approve_updates_row_and_stays_visible`,
   `test_a_failed_approve_tells_the_user_why`, `test_a_failed_reject_tells_the_user_why`, and
   `test_reject_removes_row_via_full_refresh_fallback` in some runs — fail as a group, then pass

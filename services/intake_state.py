@@ -19,8 +19,15 @@ CONVERSATIONS_FILE = os.path.expanduser('~/projects/homelab-dashboard/intake_con
 
 # plane_issue_id doubles as the 'already sent' flag -- holding the id rather than a
 # bare bool means a sent article can be traced back to its actual to-do.
+#
+# plane_project_id records WHERE that to-do lives, and is not optional once a project
+# picker exists. plane.issue_status() is allowed to clear plane_issue_id when it reads
+# 'gone', and an issue in another project answers 404 from the default one -- which is
+# indistinguishable from deleted. Without this field, re-checking an article sent to a
+# non-default project would orphan a live to-do and mark the article unsent. None means
+# "sent before the picker existed", which resolves to the configured default.
 _DEFAULT_ARTICLE_STATE = {'read': False, 'favorite': False, 'archived': False,
-                          'plane_issue_id': None}
+                          'plane_issue_id': None, 'plane_project_id': None}
 _DEFAULT_STATE = {'articles': {}, 'folders': [], 'prefs': {'density': 'cozy', 'sort': 'unread'}}
 _DEFAULT_SOURCES = {'archive': True, 'repos': []}
 DEFAULT_MODEL = 'claude'  # per-article picks (see get_model/set_model) override this
