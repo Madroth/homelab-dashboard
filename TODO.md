@@ -318,6 +318,21 @@
   Doing nothing is also a position, but it should be a chosen one: the constraint currently
   says something the code does not do, which is how the next person gets misled.
 
+- [ ] **`test_media_fixes.py` fails intermittently under host load (found 2026-09-01).** Three
+  UI-timing tests — `test_approve_updates_row_and_stays_visible`,
+  `test_a_failed_approve_tells_the_user_why`, `test_a_failed_reject_tells_the_user_why`, and
+  `test_reject_removes_row_via_full_refresh_fallback` in some runs — fail as a group, then pass
+  on a rerun. Confirmed **pre-existing and not caused by any change**: three consecutive runs of
+  the *unmodified* file gave 12 passed, 12 passed, 3 failed, and three runs of the modified file
+  gave 12/12 each time. It only appears when the box is loaded (observed at load average 20-26);
+  at normal load the full suite is green at 151.
+
+  The trap is that a single run proves nothing — I concluded "decisive, not flakiness" off one
+  sample and was wrong. Anything diagnosing this needs repeated runs. Same family as the
+  `test_toggle_select_timing_with_large_queue` flake fixed in `a329de8` (2026-08-22), so
+  NiceGUI's `User` harness timing out under contention is now a repeat pattern here rather than a
+  one-off, and probably wants a fix at the harness level rather than per-test.
+
 ## Not this project (pruned 2026-08-29)
 
 Chris's call: this backlog tracks the dashboard only. Work on the services the dashboard
