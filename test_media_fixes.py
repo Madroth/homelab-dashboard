@@ -355,3 +355,135 @@ async def test_a_failed_approve_leaves_the_row_where_it_was(user: User, fake_med
 
     assert fake_media_service[0]['status'] == 'pending'
     await user.should_see(marker='approve-0')   # still offering the action
+
+
+# ---------- the media-curator seam ----------
+#
+# services/media.py borrows five symbols from another repo over sys.path, with no package
+# boundary and no version pin. services/media_backend.py is the one place that reaching
+# happens, so a refactor over there fails loudly and legibly here instead of surfacing as
+# a bare ImportError inside a click handler. These tests hold that seam.
+
+def test_the_borrowed_surface_is_declared_in_exactly_one_place():
+    """The list is the point. If something new gets imported from media-curator without
+    being declared, the surface has silently grown again -- which is how it reached seven
+    scattered call sites in the first place."""
+    import re
+    from services import media_backend
+
+    source = open('services/media.py', encoding='utf-8').read()
+    # Nothing may import media-curator's internals directly any more.
+    for module in media_backend.REQUIRED:
+        assert not re.search(rf'^\s*from {module} import', source, re.M), (
+            f'services/media.py imports from `{module}` directly again; it must go '
+            f'through media_backend so the dependency stays declared')
+    assert 'sys.path.append' not in source
+
+    # And every symbol it does reach for must be one the contract declares.
+    for module, symbol in re.findall(r"media_backend\.get\('(\w+)',\s*'(\w+)'\)", source):
+        assert symbol in media_backend.REQUIRED.get(module, ()), (
+            f'{module}.{symbol} is used but not declared in REQUIRED')
+
+
+def test_a_symbol_media_curator_stopped_providing_says_so_by_name(monkeypatch):
+    """The failure this exists to improve. Previously: "ImportError: cannot import name
+    'approve_item'" from somewhere inside a handler. Now it names the symbol and points at
+    the coupling note."""
+    from services import media_backend
+
+    class _Stub:
+        pass   # library, but approve_item has been renamed away
+
+    monkeypatch.setitem(__import__('sys').modules, 'library', _Stub())
+    with pytest.raises(media_backend.MediaBackendUnavailable) as excinfo:
+        media_backend.get('library', 'approve_item')
+    message = str(excinfo.value)
+    assert 'library' in message and 'approve_item' in message
+    assert 'media-curator coupling' in message
+
+
+def test_reaching_for_something_undeclared_is_refused(monkeypatch):
+    """Drift in the other direction: code quietly widening the surface."""
+    from services import media_backend
+    with pytest.raises(media_backend.MediaBackendUnavailable) as excinfo:
+        media_backend.get('library', 'some_new_helper')
+    assert 'not declared in media_backend.REQUIRED' in str(excinfo.value)
+
+
+def test_a_missing_media_curator_checks_out_as_unavailable_not_healthy(monkeypatch):
+    """Same {'ok', ..., 'error'} contract as the system readers: "the backend is fine"
+    and "we could not tell" have to be different answers."""
+    from services import media_backend
+    monkeypatch.setattr(media_backend, 'MEDIA_CURATOR_PATH', '/nonexistent/media-curator')
+    report = media_backend.check()
+    assert report['ok'] is False
+    assert 'not at /nonexistent/media-curator' in report['error']
+
+
+def test_reclassify_reports_a_missing_backend_instead_of_raising(monkeypatch):
+    """reclassify() is the one path that already degraded on ImportError; it must keep
+    degrading, and now say which symbol went missing rather than 'Backend daemon not
+    found.'"""
+    from services import media_backend
+
+    class _Row(dict):
+        def __getitem__(self, k):
+            return dict.get(self, k)
+
+    class _Cursor:
+        def execute(self, *a, **kw):
+            return self
+        def fetchone(self):
+            return _Row(original_path='/tmp/x.mkv', proposed_path=None, status='pending')
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(media_service, '_get_conn', lambda: _Conn())
+
+    def _boom(module, symbol):
+        raise media_backend.MediaBackendUnavailable(
+            f'`{module}` no longer provides `{symbol}`')
+    monkeypatch.setattr(media_backend, 'get', _boom)
+
+    ok, error = media_service.reclassify('7', 'tv')
+    assert ok is False
+    assert 'identify_media' in error
+
+
+# ---------- the Rejected folder ----------
+
+@pytest.mark.nicegui_main_file('test_media_fixes.py')
+async def test_the_rejected_folder_shows_what_is_waiting_to_be_deleted(user: User,
+                                                                      monkeypatch,
+                                                                      fake_media_service):
+    """Rejection moves files aside rather than deleting them, so without this view the
+    folder fills up silently and nobody knows."""
+    monkeypatch.setattr(media_service, 'get_rejected', lambda *a, **kw: [
+        {'id': '1', 'original_filename': 'junk.mkv', 'proposed_title': 'Junk Movie',
+         'media_type': 'movie', 'created_at': '2026-09-01', 'status': 'rejected',
+         'rejected_path': '/mnt/Multimedia/Rejected/junk.mkv', 'on_disk': True},
+    ])
+    await user.open('/media-test')
+    await user.should_see('1 rejected item awaiting deletion')
+    await user.should_see('Junk Movie')
+    await user.should_see('/mnt/Multimedia/Rejected/junk.mkv')
+    await user.should_see('not deleted')
+
+
+@pytest.mark.nicegui_main_file('test_media_fixes.py')
+async def test_rejected_rows_whose_files_are_gone_are_not_listed(user: User, monkeypatch,
+                                                                 fake_media_service):
+    """Rows from before rejection stopped deleting have nothing left to clear. Listing
+    them would ask the user to go delete files that are not there."""
+    monkeypatch.setattr(media_service, 'get_rejected', lambda *a, **kw: [
+        {'id': '1', 'original_filename': 'old.mkv', 'proposed_title': 'Old Reject',
+         'media_type': 'movie', 'created_at': '2026-01-01', 'status': 'rejected',
+         'rejected_path': None, 'on_disk': False},
+    ])
+    await user.open('/media-test')
+    await user.should_not_see('awaiting deletion')
+    await user.should_not_see('Old Reject')

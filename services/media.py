@@ -1,17 +1,15 @@
 import json
 import os
 import sqlite3
-import sys
 
-if '/home/linuxbox/projects/media-curator' not in sys.path:
-    sys.path.append('/home/linuxbox/projects/media-curator')
+from services import media_backend
+from services.media_backend import MediaBackendUnavailable
 
 MEDIA_DB = os.path.expanduser('~/projects/media-curator/queue.db')
 
 
 def _get_conn():
-    from database import get_conn
-    conn = get_conn()
+    conn = media_backend.get('database', 'get_conn')()
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -85,12 +83,12 @@ def get_queue(search: str = '', media_type: str = '', status: str = '') -> list[
 
 
 def approve(item_id: str) -> tuple[bool, str]:
-    from library import approve_item
+    approve_item = media_backend.get('library', 'approve_item')
     return approve_item(item_id)
 
 
 def reject(item_id: str) -> tuple[bool, str]:
-    from library import reject_item
+    reject_item = media_backend.get('library', 'reject_item')
     return reject_item(item_id)
 
 
@@ -113,10 +111,10 @@ def reclassify(item_id: str, new_type: str) -> tuple[bool, str | None]:
         c.execute('UPDATE media_queue SET original_path=? WHERE id=?', (original_path, item_id))
 
     try:
-        from curator_daemon import identify_media
-    except ImportError:
+        identify_media = media_backend.get('curator_daemon', 'identify_media')
+    except MediaBackendUnavailable as e:
         conn.close()
-        return False, 'Backend daemon not found.'
+        return False, str(e)
 
     is_group = os.path.isdir(original_path)
     filename = os.path.basename(original_path)
@@ -203,7 +201,7 @@ def undo(item_id: str) -> tuple[bool, str | None]:
 
         proposed_path = row['proposed_path']
         original_filename = row['original_filename']
-        from curator_daemon import DROP_ZONE
+        DROP_ZONE = media_backend.get('curator_daemon', 'DROP_ZONE')
         dest_path = os.path.join(DROP_ZONE, original_filename)
 
         moved = False
@@ -239,7 +237,8 @@ def undo(item_id: str) -> tuple[bool, str | None]:
 
 
 def upload(filename: str, content: bytes) -> tuple[bool, str]:
-    from curator_daemon import DROP_ZONE, is_contained
+    DROP_ZONE = media_backend.get('curator_daemon', 'DROP_ZONE')
+    is_contained = media_backend.get('curator_daemon', 'is_contained')
     from werkzeug.utils import secure_filename
     os.makedirs(DROP_ZONE, exist_ok=True)
     safe_name = secure_filename(filename)
