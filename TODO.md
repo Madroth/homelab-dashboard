@@ -86,17 +86,13 @@
   - [x] **Decided and done `ba101fa`.** The Media Curator quick-link moved rather than
         staying — Chris's call 2026-08-22; Kuma is not a media service. `pages/media.py`
         no longer mentions it.
-  - [ ] Lab health at a glance: one honest up/degraded/down verdict **per service**, not
-        just a container's own `Status` string — a running container is not a working
-        service. *Partly there: container detail reads `.State.Health.Status`
-        (`services/system.py:527`), which is the honest per-container verdict. What is
-        missing is rolling that up to a service-level judgement in the list itself, and
-        containers with no healthcheck defined still have nothing better than their status
-        string.*
-  - [ ] System status beyond the media stack. *Delivered: the other systemd units (`get_units`),
-        load (`get_host_resources`), the NAS mount and disks. Still missing: **host uptime**,
-        and **Tailscale reachability** (Omega at `100.74.2.92`, the bridge service) — the
-        latter is P3 F14 in `LAB_HEALTH_FEATURES.md`, at the service layer, never a ping.*
+  - [x] **Done `e8189a0` (2026-09-09).** Rolled up to the list: five states derived from
+        `docker ps`, with "running, unchecked" as its own answer for a container that
+        declares no healthcheck — up, and nothing verified it. Group headers count the
+        states out instead of "N/M up".
+  - [x] **Done `5cb1694` (2026-09-09).** The last two gaps closed with F14: host uptime,
+        and Tailscale reachability at the service layer rather than by ping. Units, load,
+        the NAS mount and disks were already there.
   - [x] **Done `2bf4b9c`.** Resource usage: host CPU, memory, disks and temperature with
         kernel pressure, plus per-container `docker stats` fetched on drill-down rather
         than only for Plex. Nothing is retained — the bounded ring buffer in P2 is the
@@ -306,7 +302,13 @@
 
 ---
 
-- [ ] **`list_articles()` reads the article files, not the index (found 2026-09-01).**
+- [x] **Fixed `2a19f3f` by the homelab-intake session, then corrected here `9fd2061`.**
+  The rewrite reads the index and falls back to parsing only for files the index does not
+  cover, so it cannot return a short list. Reviewing it found the two paths were not in
+  step: `_article_from_row` served `raw_content` in original case while the file path
+  lowercases it, and `pages/intake.py:307` searches it with an already-lowered term — so
+  body-text search silently missed every capitalised word, for every indexed article. Four
+  tests now hold the invariant the docstring only asserted. *Original finding:*
   homelab-intake's CLAUDE.md is explicit: "SQLite is a derived index... The dashboard reads
   the index, never the files directly." `services/intake.py:list_articles()` instead globs
   `articles/*.md` and parses every one. Measured on the live corpus: **1,579 ms to parse 119
