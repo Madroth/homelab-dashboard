@@ -62,6 +62,14 @@ you design the "cannot tell" face before the healthy one.** Same reasoning behin
    and depend on that, so a refactor over there fails loudly — is doable from this repo alone.
    Whether media-curator publishes a real package is *their* Epic 7 and is not tracked here.
 
+## Who builds here
+
+Decided 2026-09-01: **building work on this repo happens in a session working in this repo.**
+Other projects' sessions may add `TODO.md` items — bugs, findings, requests — and nothing else:
+no source or test edits, no service restarts. The full reasoning is in `CLAUDE.md`, which every
+session working here loads. Three sessions edited this tree in one evening and a routine restart
+deployed two of them unreviewed; the code was fine, the coordination was not.
+
 ## Scope — this repo tracks the dashboard only
 
 Decided 2026-08-29. Configuring the services the dashboard *looks at* is the owning project's
