@@ -243,7 +243,13 @@
     dead end the hardening pass had created: nothing cleared `plane_issue_id`, and the
     control it drives refuses to resend, so a to-do deleted in Plane left the article
     permanently unsendable short of hand-editing `intake_state.json`.
-  - [ ] No project picker: every article goes to the one project in `.env`.
+  - [x] **Done 2026-09-09.** A picker in the intake header chooses where the next to-do
+        lands, listing the workspace's projects with the `.env` default first. The
+        load-bearing part is not the dropdown: `plane_issue_id` now travels with
+        `plane_project_id`, because `issue_status()` may CLEAR that link when it reads
+        'gone', and an issue in another project answers 404 from the default one —
+        indistinguishable from deleted. Without recording the project, the first re-check
+        of an article sent elsewhere would orphan a live to-do and mark it unsent.
   - [ ] A sent article's to-do is write-once; nothing updates it afterwards.
 
 - [ ] **media-curator coupling — a change over there landed today that reaches in here (2026-08-22)**
