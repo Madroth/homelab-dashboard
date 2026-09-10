@@ -75,7 +75,7 @@ def _clock(ts: float) -> str:
 
 def build():
     state = {'status': None, 'logs': [], 'errors': None, 'units': None,
-             'status_error': None, 'resources': None, 'query': '', 'reach': None}
+             'status_error': None, 'resources': None, 'query': '', 'reach': None, 'smart': None}
 
     # ---------- shared chrome ----------
 
@@ -133,6 +133,8 @@ def build():
         'status', 30.0, partial=lambda d: bool(d.get('containers_error')))
     stamp_resources = _stamp_for('resources', 30.0)
     stamp_network = _stamp_for('reach', 120.0)
+    # smartd polls on its own slow schedule, so this reader is cheap and rarely changes.
+    stamp_smart = _stamp_for('smart', 900.0)
 
     # F7. With 54 containers and 101 units, scrolling is not navigation.
     #
@@ -209,15 +211,20 @@ def build():
         # into this page the right call in the first place.
         reach = state['reach']
         down = (reach or {}).get('down') or []
+        smart = state['smart']
+        bad_disks = [d['label'] for d in (smart or {}).get('disks', [])
+                     if d.get('ok') and d.get('failing')]
 
         if errors is None:
             tone, title, detail = theme.TEXT_MUTED, 'Reading…', 'Collecting errors, units and containers.'
         elif unreadable:
             tone, title = theme.TEXT_MUTED, 'Cannot tell'
             detail = f"A source did not answer — {errors['error']}. What is shown is incomplete."
-        elif failed or down:
+        elif failed or down or bad_disks:
             tone, title = theme.RED, 'Something is broken'
             parts = []
+            if bad_disks:
+                parts.append('SMART errors on ' + ', '.join(bad_disks[:2]))
             if failed:
                 names = ', '.join(u['origin'] for u in failed[:3])
                 parts.append(f"{len(failed)} unit(s) in a failed state: {names}")
@@ -565,6 +572,78 @@ def build():
         elif len(all_units) > len(shown):
             ui.label(f'{len(all_units) - len(shown)} more units not shown').style(
                 f'font-size:10.5px;color:{theme.TEXT_DIM};margin-top:8px')
+
+    # ---------- disk health / SMART (F13) ----------
+
+    @ui.refreshable
+    def render_smart():
+        smart = state['smart']
+        if smart is None:
+            ui.element('div').classes('nq-skel').style(
+                'height:70px;border-radius:9px;background:rgba(255,255,255,0.04);width:100%')
+            return
+        if not smart['disks']:
+            _unknown_box(f"No SMART data — {smart['error']}")
+            return
+
+        with ui.column().style('gap:8px;width:100%'):
+            for disk in smart['disks']:
+                if not disk['ok']:
+                    _unknown_box(f"{disk['label']} — {disk['error']}")
+                    continue
+
+                failing, unreported = disk['failing'], disk['unreported']
+                if failing:
+                    tone, verdict = theme.RED, 'Failing'
+                elif unreported:
+                    # Not green. Three of the six attributes that mean "dying" are simply
+                    # not published by this device, so the clean ones do not add up to a
+                    # clean bill -- they add up to "nothing bad in what it does tell us".
+                    tone, verdict = theme.TEXT_MUTED, 'No errors in what it reports'
+                else:
+                    tone, verdict = theme.GREEN, 'No errors reported'
+
+                with ui.column().style(
+                        f'gap:7px;padding:13px 15px;border-radius:9px;width:100%;'
+                        f'background:{theme.CARD_BG};border:1px solid '
+                        + (theme.RED if failing else theme.BORDER)):
+                    with ui.row().classes('items-center no-wrap w-full').style('gap:10px'):
+                        ui.icon('fa-solid fa-hard-drive').style(f'color:{tone};font-size:12px')
+                        ui.label(disk['label']).style(
+                            f"font-size:11.5px;font-weight:600;color:{theme.TEXT};"
+                            f"font-family:'JetBrains Mono',monospace;overflow:hidden;"
+                            f"text-overflow:ellipsis;white-space:nowrap")
+                        ui.space()
+                        ui.label(verdict).style(
+                            f'font-size:11px;font-weight:700;color:{tone};flex:none')
+
+                    for bad in failing:
+                        ui.label(f"{bad['name']}: {bad['raw']} (SMART attribute {bad['id']})").style(
+                            f'font-size:11px;font-weight:600;color:{theme.RED}')
+
+                    facts = []
+                    if disk.get('life_left_pct') is not None:
+                        facts.append(f"life left {disk['life_left_pct']}%")
+                    if disk.get('temp_c') is not None:
+                        facts.append(f"{disk['temp_c']} °C")
+                    if disk.get('power_on_hours') is not None:
+                        facts.append(f"{disk['power_on_hours']:,} powered-on hours")
+                    if disk.get('power_cycles') is not None:
+                        facts.append(f"{disk['power_cycles']:,} power cycles")
+                    if facts:
+                        ui.label(' · '.join(facts)).style(
+                            f'font-size:10.5px;color:{theme.TEXT_MUTED}')
+
+                    if unreported:
+                        ui.label('This drive does not report: ' + ', '.join(unreported)
+                                 + ' — absent is not zero, so those are unknown, not clean.').style(
+                            f'font-size:10.5px;color:{theme.TEXT_DIM}')
+                    ui.label(f"smartd sampled this at {disk['sampled']}.").style(
+                        f'font-size:10px;color:{theme.TEXT_DIM}')
+
+            ui.label('smartd is watching these disks but mails its alerts to root, and this '
+                     'host has no mail system — so this page is the only place they appear.').style(
+                f'font-size:10.5px;color:{theme.AMBER};margin-top:2px')
 
     # ---------- network & reachability (F14) ----------
 
@@ -1146,6 +1225,16 @@ def build():
             state['logs'] = logs
             render_logs.refresh()
 
+    async def refresh_smart():
+        smart = await run.io_bound(system.get_disk_health)
+        if smart is None:
+            return
+        if client_alive():
+            state['smart'] = smart
+            render_smart.refresh()
+            render_verdict.refresh()
+            stamp_smart.refresh()
+
     async def refresh_network():
         reach = await run.io_bound(system.get_reachability)
         if reach is None:
@@ -1184,6 +1273,7 @@ def build():
         await refresh_resources()
         await refresh_status()
         await refresh_network()
+        await refresh_smart()
 
     # ---------- AI context ----------
 
@@ -1267,6 +1357,9 @@ def build():
         _section_label('NETWORK & REACHABILITY', stamp=stamp_network)
         render_network()
 
+        _section_label('DISK HEALTH — SMART', stamp=stamp_smart)
+        render_smart()
+
         with ui.row().classes('items-center no-wrap').style('margin:28px 0 12px;gap:10px'):
             ui.label('DAEMON LOG (LAST 100 LINES)').style(
                 f'font-size:11.5px;font-weight:700;letter-spacing:0.5px;color:{theme.TEXT_DIM}')
@@ -1279,17 +1372,19 @@ def build():
     ui.timer(0.05, refresh_status, once=True)
     ui.timer(0.05, refresh_logs, once=True)
     ui.timer(0.2, refresh_network, once=True)
+    ui.timer(0.3, refresh_smart, once=True)
     ui.timer(15.0, refresh_status)
     ui.timer(15.0, refresh_resources)
     ui.timer(30.0, refresh_errors)
     # Slower than the rest: every probe is a network round trip with a timeout budget.
     ui.timer(60.0, refresh_network)
+    ui.timer(600.0, refresh_smart)
 
     def tick_stamps():
         if not client_alive():
             return
         for stamp in (stamp_errors, stamp_units, stamp_containers, stamp_resources,
-                      stamp_network):
+                      stamp_network, stamp_smart):
             stamp.refresh()
 
     ui.timer(5.0, tick_stamps)

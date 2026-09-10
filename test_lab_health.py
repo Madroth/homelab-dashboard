@@ -160,7 +160,18 @@ _HEALTHY_REACH = {
 }
 
 
-def _stub_page(monkeypatch, *, errors, units=None, status=None, resources=None, reach=None):
+_HEALTHY_SMART = {
+    'ok': True, 'error': None, 'read_at': _NOW,
+    'disks': [{'label': 'KINGSTON_SQ500-ABC', 'ok': True, 'error': None, 'read_at': _NOW,
+               'sampled': '2026-09-09 22:08:57', 'failing': [],
+               'clean': ['Reported uncorrectable errors', 'UDMA CRC errors'],
+               'unreported': [], 'power_on_hours': 6600, 'power_cycles': 138,
+               'life_left_pct': 96, 'temp_c': 34}],
+}
+
+
+def _stub_page(monkeypatch, *, errors, units=None, status=None, resources=None, reach=None,
+               smart=None):
     monkeypatch.setattr(system_service, 'get_errors', lambda *a, **kw: errors)
     monkeypatch.setattr(system_service, 'get_units',
                         lambda *a, **kw: units or {'ok': True, 'units': [], 'error': None,
@@ -177,6 +188,8 @@ def _stub_page(monkeypatch, *, errors, units=None, status=None, resources=None, 
     # reachability panel would make real network probes during the test run.
     monkeypatch.setattr(system_service, 'get_reachability',
                         lambda *a, **kw: reach or _HEALTHY_REACH)
+    monkeypatch.setattr(system_service, 'get_disk_health',
+                        lambda *a, **kw: smart or _HEALTHY_SMART)
     monkeypatch.setattr(system_service, 'get_uptime',
                         lambda *a, **kw: {'ok': True, 'error': None, 'seconds': 486000.0,
                                           'booted_at': _NOW - 486000.0})
@@ -1009,3 +1022,95 @@ async def test_a_vendor_blurb_is_labelled_as_one(user: User, monkeypatch):
     user.find(marker='container-someapp').click()
     await asyncio.sleep(0.3)
     await user.should_see("from the image's own label, not written for this host")
+
+
+# ---------- F13: SMART ----------
+
+def _attrlog(tmp_path, name, row):
+    d = tmp_path / 'smartd'
+    d.mkdir(exist_ok=True)
+    (d / f'attrlog.{name}.ata.csv').write_text(row + '\n', encoding='utf-8')
+    return d
+
+
+def test_smart_reads_the_newest_row_of_smartds_own_log(tmp_path, monkeypatch):
+    """Read smartd's output rather than shelling out to smartctl: smartctl needs root,
+    this app is a user service, and smartd is already polling so nothing wakes a disk."""
+    d = _attrlog(tmp_path, 'DISK-1',
+                 '2026-09-09 22:08:57;\t5;100;0;\t9;100;6600;\t12;100;138;\t187;100;0;\t'
+                 '196;100;0;\t197;100;0;\t198;100;0;\t199;100;0;\t231;96;96;\t194;66;34;')
+    monkeypatch.setattr(system_service, 'SMARTD_STATE_DIR', str(d))
+    out = system_service.get_disk_health()
+    assert out['ok'] is True
+    disk = out['disks'][0]
+    assert disk['failing'] == [] and disk['unreported'] == []
+    assert disk['power_on_hours'] == 6600
+    assert disk['life_left_pct'] == 96
+    assert disk['temp_c'] == 34
+
+
+def test_a_nonzero_critical_attribute_is_reported_as_failing(tmp_path, monkeypatch):
+    d = _attrlog(tmp_path, 'DISK-1',
+                 '2026-09-09 22:08:57;\t5;100;7;\t9;100;6600;\t187;100;0;\t196;100;0;\t'
+                 '197;100;2;\t198;100;0;\t199;100;0;')
+    monkeypatch.setattr(system_service, 'SMARTD_STATE_DIR', str(d))
+    disk = system_service.get_disk_health()['disks'][0]
+    names = {f['name']: f['raw'] for f in disk['failing']}
+    assert names == {'Reallocated sectors': 7, 'Current pending sectors': 2}
+
+
+def test_an_attribute_the_drive_does_not_report_is_unknown_not_zero(tmp_path, monkeypatch):
+    """The load-bearing one. This host's SSD publishes no attribute 5 at all. Treating
+    absent as zero would render 'no reallocated sectors' -- a reassurance the drive never
+    actually gave."""
+    d = _attrlog(tmp_path, 'DISK-1', '2026-09-09 22:08:57;\t9;100;6600;\t199;100;0;')
+    monkeypatch.setattr(system_service, 'SMARTD_STATE_DIR', str(d))
+    disk = system_service.get_disk_health()['disks'][0]
+    assert 'Reallocated sectors' in disk['unreported']
+    assert 'Reallocated sectors' not in disk['clean']
+    assert disk['failing'] == []          # unknown is not failing either
+
+
+def test_smart_fails_closed_when_smartd_has_written_nothing(tmp_path, monkeypatch):
+    empty = tmp_path / 'smartd'
+    empty.mkdir()
+    monkeypatch.setattr(system_service, 'SMARTD_STATE_DIR', str(empty))
+    out = system_service.get_disk_health()
+    assert out['ok'] is False
+    assert 'not writing attribute logs' in out['error']
+    assert out['disks'] == []
+
+
+def test_smart_fails_closed_when_the_state_dir_is_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(system_service, 'SMARTD_STATE_DIR', str(tmp_path / 'nope'))
+    out = system_service.get_disk_health()
+    assert out['ok'] is False and 'does not exist' in out['error']
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_failing_disk_cannot_sit_under_a_green_banner(user: User, monkeypatch):
+    smart = {'ok': True, 'error': None, 'read_at': _NOW, 'disks': [
+        {'label': 'KINGSTON_SQ500-ABC', 'ok': True, 'error': None, 'read_at': _NOW,
+         'sampled': '2026-09-09 22:08:57',
+         'failing': [{'name': 'Reallocated sectors', 'id': 5, 'raw': 7}],
+         'clean': [], 'unreported': [], 'power_on_hours': 6600, 'power_cycles': 138,
+         'life_left_pct': 96, 'temp_c': 34}]}
+    _stub_page(monkeypatch, errors=_errors([]), smart=smart)
+    await user.open('/lab-health-test')
+    await user.should_see('Something is broken')
+    await user.should_see('SMART errors on KINGSTON_SQ500-ABC')
+    await user.should_see('Reallocated sectors: 7')
+    await user.should_not_see('Nothing is broken')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_partly_reporting_drive_is_not_shown_as_clean(user: User, monkeypatch):
+    smart = {'ok': True, 'error': None, 'read_at': _NOW, 'disks': [
+        {'label': 'DISK-1', 'ok': True, 'error': None, 'read_at': _NOW,
+         'sampled': '2026-09-09 22:08:57', 'failing': [], 'clean': ['UDMA CRC errors'],
+         'unreported': ['Reallocated sectors'], 'power_on_hours': 10,
+         'power_cycles': 1, 'life_left_pct': None, 'temp_c': None}]}
+    _stub_page(monkeypatch, errors=_errors([]), smart=smart)
+    await user.open('/lab-health-test')
+    await user.should_see('No errors in what it reports')
+    await user.should_see('absent is not zero')

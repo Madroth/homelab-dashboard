@@ -734,6 +734,118 @@ def get_uptime() -> dict:
             'booted_at': time.time() - seconds}
 
 
+# F13. SMART, read from smartd's own world-readable attribute log rather than by shelling
+# out to smartctl. Three reasons that is the better source and not merely the accessible one:
+# smartctl needs root and this app is a user service; smartd is already polling on its own
+# schedule, so reading its output wakes no disk that was allowed to sleep; and it is the
+# component whose alerts are going nowhere, so reading its own record is reading exactly what
+# is being lost. `/etc/smartd.conf` mails root via smartd-runner and this host has no MTA at
+# all -- so a disk could be reporting reallocated sectors right now and the only trace would
+# be a file nobody opens.
+#
+# Only the newest row is read. The log is a time series and this is deliberately not one --
+# a current value on demand, which MONITORING.md permits, not a trend, which it does not.
+SMARTD_STATE_DIR = '/var/lib/smartmontools'
+
+# The attributes that actually mean a disk is dying. Non-zero raw on any of these is the
+# signal; everything else on a SMART report is context.
+_SMART_CRITICAL = {
+    5: 'Reallocated sectors',
+    187: 'Reported uncorrectable errors',
+    196: 'Reallocation events',
+    197: 'Current pending sectors',
+    198: 'Offline uncorrectable sectors',
+    199: 'UDMA CRC errors',
+}
+
+
+def _parse_attrlog_row(row: str) -> dict:
+    """`ts;\tid;val;raw;\tid;val;raw;...` -> {id: {'val': int, 'raw': int}}."""
+    attrs = {}
+    for group in row.split('\t'):
+        parts = [p for p in group.strip().strip(';').split(';') if p != '']
+        if len(parts) != 3:
+            continue
+        try:
+            attrs[int(parts[0])] = {'val': int(parts[1]), 'raw': int(parts[2])}
+        except ValueError:
+            continue
+    return attrs
+
+
+def get_disk_health() -> dict:
+    """SMART for every disk smartd is watching, from its attribute log."""
+    if not os.path.isdir(SMARTD_STATE_DIR):
+        return {'ok': False, 'disks': [],
+                'error': f'{SMARTD_STATE_DIR} does not exist — smartmontools may not be installed'}
+    try:
+        logs = [f for f in os.listdir(SMARTD_STATE_DIR)
+                if f.startswith('attrlog.') and f.endswith('.csv')]
+    except OSError as e:
+        return {'ok': False, 'disks': [], 'error': f'cannot read {SMARTD_STATE_DIR} ({e})'}
+
+    if not logs:
+        return {'ok': False, 'disks': [],
+                'error': 'smartd is not writing attribute logs — nothing to read. '
+                         'It may be running without -A, or watching no devices.'}
+
+    disks, problems = [], []
+    for name in sorted(logs):
+        path = os.path.join(SMARTD_STATE_DIR, name)
+        # attrlog.<MODEL>-<SERIAL>.<type>.csv
+        label = name[len('attrlog.'):].rsplit('.', 2)[0]
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                rows = [r for r in f.read().splitlines() if r.strip()]
+            mtime = os.path.getmtime(path)
+        except OSError as e:
+            problems.append(f'{label}: {e}')
+            disks.append({'label': label, 'ok': False, 'error': str(e)})
+            continue
+        if not rows:
+            problems.append(f'{label}: attribute log is empty')
+            disks.append({'label': label, 'ok': False, 'error': 'attribute log is empty'})
+            continue
+
+        stamp, _, rest = rows[-1].partition(';')
+        attrs = _parse_attrlog_row(rest)
+        if not attrs:
+            problems.append(f'{label}: unparseable attribute row')
+            disks.append({'label': label, 'ok': False,
+                          'error': 'newest attribute row could not be parsed'})
+            continue
+
+        # An attribute this device does not report is NOT a zero. A drive that never
+        # publishes attribute 5 has not told us it has no reallocated sectors, and
+        # rendering that as a clean tick would be inventing the reassurance.
+        failing, clean, unreported = [], [], []
+        for attr_id, attr_name in _SMART_CRITICAL.items():
+            if attr_id not in attrs:
+                unreported.append(attr_name)
+            elif attrs[attr_id]['raw'] > 0:
+                failing.append({'name': attr_name, 'id': attr_id,
+                                'raw': attrs[attr_id]['raw']})
+            else:
+                clean.append(attr_name)
+
+        temp = attrs.get(194)
+        disks.append({
+            'label': label, 'ok': True, 'error': None,
+            'read_at': mtime, 'sampled': stamp.strip(),
+            'failing': failing, 'clean': clean, 'unreported': unreported,
+            'power_on_hours': attrs.get(9, {}).get('raw'),
+            'power_cycles': attrs.get(12, {}).get('raw'),
+            # Attribute 231's normalised value is percent of life left on most SSDs.
+            'life_left_pct': attrs.get(231, {}).get('val'),
+            # 194's raw packs several fields; the current temperature is the low 16 bits.
+            'temp_c': (temp['raw'] & 0xFFFF) if temp else None,
+        })
+
+    return {'ok': not problems, 'disks': disks,
+            'read_at': time.time(),
+            'error': '; '.join(problems) if problems else None}
+
+
 def get_top_processes(limit: int = 8) -> dict:
     """Top CPU consumers -- the answer to 'what is eating this'."""
     ok, out = _run(['ps', '-eo', 'pid,pcpu,pmem,rss,comm', '--sort=-pcpu', '--no-headers'])
