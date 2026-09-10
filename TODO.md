@@ -169,12 +169,20 @@
         reached-but-unhappy kept apart from did-not-answer; tailnet state filtered to lab
         peers. It feeds the verdict, so a dead service cannot sit under a green banner.
         Host uptime landed with it, closing the second P1 leftover.
-  - [ ] Rest of P3 from `LAB_HEALTH_FEATURES.md`: SMART (F13), backups (F15, QNAP2 never
-        probed) and remote hosts (F16, with an explicit "last reviewed" since this box
-        cannot enumerate them). P4 stays parked on registry-driven work.
-  - [ ] Still open from the original monitoring wishlist: rolling per-container health up
-        to a service-level verdict in the list. A container with no healthcheck declared
-        needs an answer that is not "healthy".
+  - [x] **P3 complete 2026-09-09.** F13 SMART read from smartd's own world-readable
+        attribute log (no root needed, wakes no disk, and it is exactly the record whose
+        alerts are being lost); an attribute a drive does not publish is unknown, never
+        zero. F15 backups read from systemd rather than a self-report nobody would
+        maintain. F16 reads HARDWARE.md so the dashboard is wrong exactly when the
+        canonical doc is; everything is a dated claim except tailnet reachability, and
+        QNAP2 renders as off-limits by policy rather than as a coverage gap.
+  - [ ] P4 stays parked on registry-driven work — needs real check output from
+        `homelab-monitoring`. With M1 closed that project can now move, so this may
+        unblock sooner than earlier handoffs assumed.
+  - [x] **Done 2026-09-09.** Per-container health rolls up to a service-level verdict.
+        A container with no declared healthcheck reads "running, unchecked" — Chris's
+        call — as a hollow outline rather than a filled box, and does not count as broken
+        in group ranking or in the AI sidebar's context.
 
 - [ ] **Local model host — interim substitution, needs a real answer (2026-09-01)**
   Omega's Ollama stopped answering and the AI sidebar's local-model path died with it. The
@@ -272,8 +280,15 @@
         5 page-level tests. Added 3 more covering the gap that mattered — a service failure
         reaching the user rather than arriving as nothing — plus the 4 undo tests on the
         service side. `test_media_fixes.py` is at 12.
-  - [ ] Still thin: nothing covers `reclassify()` or the Rejected folder.
-  - [ ] **Dashboard side of the boundary:** name what this app actually needs from
+  - [x] **Done 2026-09-09.** `reclassify()` degrades with the missing symbol named, and
+        the Rejected folder shows what awaits deletion while omitting rows whose files
+        are already gone.
+  - [x] **Done 2026-09-09 — `services/media_backend.py`.** One declared surface of five
+        symbols, a named failure instead of a bare ImportError, a `check()` following the
+        reader contract, and tests that fail if `services/media.py` imports those modules
+        directly again or reaches for something undeclared. The coupling itself remains —
+        only media-curator can remove it — but it is now explicit and loud.
+        *Original note:* name what this app actually needs from
         media-curator (approve, reject, reclassify, identify, the drop zone) and depend on
         that surface instead of reaching past `sys.path` into its internals — so a refactor
         over there fails loudly here. Doable from this repo alone against today's imports;

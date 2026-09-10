@@ -169,9 +169,11 @@ fifth of this lab; a page organised around it will not scale.
 
 ---
 
-# P3 — Breadth
+# P3 — Breadth — **DONE 2026-09-09**
 
 ### F13 · Disk SMART
+
+> **Done.** Read from smartd's world-readable attribute log, newest row only — no root, no disk wakeups, and it is the record whose alerts are being lost (`-m root`, no MTA). An attribute the drive does not publish is unknown, never zero.
 `smartctl` is installed. Reallocated sectors, pending sectors, power-on hours, self-test
 results. `smartd` currently mails alerts into a mail system that does not exist on this host,
 so this is the only place they would be seen.
@@ -183,11 +185,15 @@ Tailscale state, the CIFS mount's real responsiveness (not just "is it a mountpo
 whether key endpoints answer — Omega's model server at the service layer, never a ping.
 
 ### F15 · Backups view
+
+> **Done.** From systemd's own record rather than a self-report convention. Sizes and contents are only ever what each job says about itself. QNAP2 never probed.
 When each backup last ran, what it wrote, and how big — read from each job's own self-report.
 **QNAP2 is never probed**, by policy; the backup job is the only sanctioned thing that talks
 to it.
 
 ### F16 · Remote hosts
+
+> **Done.** Reads ~/HomeLab/HARDWARE.md rather than copying it. Dated claims, except tailnet reachability which is checked; a host we cannot ask is never called offline. QNAP2 renders as off-limits by policy.
 Omega, qnap1, steamdeck, kitchen — with an explicit "last reviewed" and an expiry, because
 this box cannot enumerate them and anything shown is a claim rather than a fact. QNAP2 renders
 as deliberately off-limits, never as unknown.

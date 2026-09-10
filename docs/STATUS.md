@@ -15,7 +15,11 @@ just "where things stand and what to do next".
 (`test_toggle_select_timing_with_large_queue`) was rewritten to assert work done instead of
 wall-clock and now runs green repeatedly.
 
-**Lab Health page — P0, P1 and P2 complete.** P1 gave every panel an "as of" stamp that
+**Lab Health page — P0 through P3 complete.** P3 added SMART (F13), reachability (F14),
+backups (F15) and remote hosts (F16), plus the service-level health roll-up. Only P4 remains,
+and it waits on another project.
+
+**Earlier:** P1 gave every panel an "as of" stamp that
 ages into amber on its own timer, and one filter box across errors, units and containers
 that cannot make the lab look healthier than it is. P2 added a 60-sample in-process ring
 buffer (dropped on restart, never persisted, never alerted on) and the correlation window
@@ -51,12 +55,14 @@ you design the "cannot tell" face before the healthy one.** Same reasoning behin
 
 ## What to do next
 
-1. **Lab Health P3, remainder** — SMART (F13), backups (F15), remote hosts (F16). F14 and
-   host uptime are done. Also still open: rolling per-container health up to a service-level
-   verdict, where a container with no healthcheck needs an answer that is not "healthy".
-2. **`reclassify()` and the Rejected folder have no tests.** `test_media_fixes.py` covers undo
+1. **P4** — everything registry-driven, still parked on `homelab-monitoring` producing real
+   check output. With M1 closed that project can move, so this may unblock sooner than earlier
+   handoffs assumed. Design is in `docs/MONITORING_BRIEF.md` and the canvas; do not redo it.
+2. **Omega is still down** (8+ days). The AI sidebar runs against the local CPU-only Ollama,
+   which is slow — see `TODO.md` "Local model host". Restarting Ollama on Omega is Chris's. `test_media_fixes.py` covers undo
    and the failure-surfacing paths; those two are the remaining gaps.
-3. **Give `services/media.py` a defined boundary** — it imports media-curator's internals over
+3. ~~**Give `services/media.py` a defined boundary**~~ — done, `services/media_backend.py`.
+   *Original note:* — it imports media-curator's internals over
    `sys.path.append` with no package boundary and no version pin, which is what made this week's
    `undo()` data-integrity bug possible. The dashboard-side fix — name the surface this app needs
    and depend on that, so a refactor over there fails loudly — is doable from this repo alone.
