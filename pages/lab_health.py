@@ -37,13 +37,62 @@ def _slug(text: str) -> str:
     return re.sub(r'[^a-zA-Z0-9]+', '-', text).strip('-').lower() or 'unknown'
 
 
+# Rolling a container's own state up to a verdict about the *service* inside it.
+#
+# The distinction that matters, and the reason there are five states rather than three:
+# `docker ps` writes "(healthy)" into its Status string only when the image actually
+# declares a healthcheck. A bare "Up 2 hours" therefore means something quite different
+# from "Up 2 hours (healthy)" -- the first says the process has not exited, the second
+# says something inside checked and answered. Most images on this host declare nothing.
+#
+# Collapsing those two into one green tick is the exact lie this page exists to prevent:
+# a running container is not a working service. But rendering every undeclared container
+# as "unknown" would put most of the lab behind a dashed panel and train everyone to
+# ignore it. So "running, unchecked" is its own state -- it says the container is up AND
+# that nothing verified it, claiming neither more nor less than is true.
+HEALTH_DOWN = 'down'
+HEALTH_UNHEALTHY = 'unhealthy'
+HEALTH_STARTING = 'starting'
+HEALTH_HEALTHY = 'healthy'
+HEALTH_UNCHECKED = 'unchecked'
+
+
+def _container_health(status_text: str) -> str:
+    s = (status_text or '').lower()
+    if not s:
+        return HEALTH_UNCHECKED
+    if 'exited' in s or 'dead' in s or 'created' in s or 'removing' in s:
+        return HEALTH_DOWN
+    if 'unhealthy' in s:
+        return HEALTH_UNHEALTHY
+    if 'health: starting' in s or 'waiting' in s or 'restarting' in s:
+        return HEALTH_STARTING
+    if 'healthy' in s:            # reached only when not 'unhealthy', checked above
+        return HEALTH_HEALTHY
+    return HEALTH_UNCHECKED
+
+
+HEALTH_TONE = {
+    HEALTH_DOWN: theme.RED,
+    HEALTH_UNHEALTHY: theme.RED,
+    HEALTH_STARTING: theme.AMBER,
+    HEALTH_HEALTHY: theme.GREEN,
+    HEALTH_UNCHECKED: theme.TEXT_MUTED,
+}
+
+HEALTH_LABEL = {
+    HEALTH_DOWN: 'down',
+    HEALTH_UNHEALTHY: 'unhealthy',
+    HEALTH_STARTING: 'starting',
+    HEALTH_HEALTHY: 'healthy',
+    HEALTH_UNCHECKED: 'running, unchecked',
+}
+
+
 def _container_color(status_text: str) -> str:
-    s = status_text.lower()
-    if 'exited' in s or 'unhealthy' in s:
-        return theme.RED
-    if 'health: starting' in s or 'waiting' in s:
-        return theme.AMBER
-    return theme.GREEN
+    """Kept for callers that only need a colour. Note that an unchecked container is
+    NOT green here -- it never was verified, so it must not read as verified."""
+    return HEALTH_TONE[_container_health(status_text)]
 
 
 def _ago(ts: float) -> str:
@@ -914,26 +963,43 @@ def build():
         for c in containers:
             groups.setdefault(_project_of(c), []).append(c)
 
+        # Only down/unhealthy count as wrong. An unchecked container is not a problem --
+        # it is an absence of evidence, and sorting the lab by it would bury the
+        # containers that are actually broken under the ones nobody wrote a healthcheck for.
+        def _broken(members):
+            return [m for m in members
+                    if _container_health(m.get('Status', ''))
+                    in (HEALTH_DOWN, HEALTH_UNHEALTHY)]
+
         def _group_rank(item):
             name, members = item
-            unhealthy = sum(1 for m in members
-                            if _container_color(m.get('Status', '')) != theme.GREEN)
-            return (-unhealthy, name)
+            return (-len(_broken(members)), name)
 
         with ui.column().style('gap:14px;width:100%'):
             for project, members in sorted(groups.items(), key=_group_rank):
-                down = [m for m in members if _container_color(m.get('Status', '')) != theme.GREEN]
+                broken = _broken(members)
+                counts = {}
+                for m in members:
+                    kind = _container_health(m.get('Status', ''))
+                    counts[kind] = counts.get(kind, 0) + 1
                 with ui.column().style('gap:7px;width:100%'):
                     with ui.row().classes('items-center no-wrap').style('gap:9px'):
                         ui.label(project).style(
                             f"font-size:11.5px;font-weight:700;color:{theme.TEXT};"
                             f"font-family:'JetBrains Mono',monospace")
-                        ui.label(f'{len(members) - len(down)}/{len(members)} up').style(
-                            f'font-size:10.5px;color:{theme.RED if down else theme.TEXT_DIM}')
+                        # Spelled out rather than "N/M up", because "up" is the word that
+                        # hides the whole distinction: it is true of a healthy container
+                        # and of an unchecked one alike.
+                        for kind in (HEALTH_DOWN, HEALTH_UNHEALTHY, HEALTH_STARTING,
+                                     HEALTH_HEALTHY, HEALTH_UNCHECKED):
+                            if counts.get(kind):
+                                ui.label(f'{counts[kind]} {HEALTH_LABEL[kind]}').style(
+                                    f'font-size:10.5px;color:{HEALTH_TONE[kind]};flex:none')
                     with ui.grid(columns='repeat(auto-fill, minmax(210px, 1fr))').style(
                             'gap:10px;width:100%'):
                         for c in members:
-                            color = _container_color(c.get('Status', ''))
+                            kind = _container_health(c.get('Status', ''))
+                            color = HEALTH_TONE[kind]
                             name = c.get('Names', '')
                             with ui.column().classes('cursor-pointer').style(
                                     f'background:{theme.CARD_BG};border:1px solid {theme.BORDER};'
@@ -941,13 +1007,18 @@ def build():
                             ).on('click', lambda _, n=name: show_container_detail(n)).mark(
                                     f'container-{_slug(name)}'):
                                 with ui.row().classes('items-center no-wrap').style('gap:8px'):
-                                    ui.icon('fa-solid fa-box').style(f'color:{color};font-size:11px')
+                                    ui.icon('fa-regular fa-square' if kind == HEALTH_UNCHECKED
+                                            else 'fa-solid fa-box').style(
+                                        f'color:{color};font-size:11px')
                                     ui.label(name).style(
                                         f'font-weight:600;font-size:12px;color:{theme.TEXT};'
                                         f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap')
                                 ui.label(c.get('Status', '')).style(
                                     f'font-size:10.5px;color:{theme.TEXT_MUTED};overflow:hidden;'
                                     f'text-overflow:ellipsis;white-space:nowrap;max-width:100%')
+                                if kind == HEALTH_UNCHECKED:
+                                    ui.label('no healthcheck declared').style(
+                                        f'font-size:9.5px;font-style:italic;color:{theme.TEXT_DIM}')
         _filtered_note(len(containers), len(all_containers))
 
     def _human(n):
@@ -1280,10 +1351,15 @@ def build():
     def get_context_summary():
         status = state['status'] or {}
         containers = status.get('containers') or []
-        unhealthy = [c for c in containers if _container_color(c.get('Status', '')) != theme.GREEN]
+        unhealthy = [c for c in containers
+                     if _container_health(c.get('Status', ''))
+                     in (HEALTH_DOWN, HEALTH_UNHEALTHY)]
+        unchecked = [c for c in containers
+                     if _container_health(c.get('Status', '')) == HEALTH_UNCHECKED]
         errors = state['errors'] or {}
         failed = [e for e in errors.get('entries', []) if e['source'] == 'unit']
-        lines = [f"Viewing Lab Health. {len(containers)} container(s), {len(unhealthy)} unhealthy/starting. "
+        lines = [f"Viewing Lab Health. {len(containers)} container(s), {len(unhealthy)} down or unhealthy, "
+                 f"{len(unchecked)} running with no healthcheck declared (unverified, not healthy). "
                  f"{len(failed)} failed unit(s), {len(errors.get('entries', []))} distinct error(s) in 24h."]
         lines += [f"- FAILED {e['origin']}" for e in failed]
         lines += [f"- {e['origin']}: {e['message'][:160]}" for e in errors.get('entries', [])[:10]
@@ -1295,11 +1371,15 @@ def build():
     def get_context_card():
         status = state['status'] or {}
         containers = status.get('containers') or []
-        unhealthy = [c for c in containers if _container_color(c.get('Status', '')) != theme.GREEN]
+        unhealthy = [c for c in containers
+                     if _container_health(c.get('Status', ''))
+                     in (HEALTH_DOWN, HEALTH_UNHEALTHY)]
+        unchecked = [c for c in containers
+                     if _container_health(c.get('Status', '')) == HEALTH_UNCHECKED]
         errors = state['errors'] or {}
         failed = [e for e in errors.get('entries', []) if e['source'] == 'unit']
         pills = [f'{len(containers)} containers', f'{len(unhealthy)} unhealthy',
-                 f'{len(failed)} failed units']
+                 f'{len(unchecked)} unchecked', f'{len(failed)} failed units']
         if failed:
             focus = 'Failed: ' + ', '.join(e['origin'] for e in failed)
         elif errors.get('entries'):

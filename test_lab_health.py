@@ -1114,3 +1114,63 @@ async def test_a_partly_reporting_drive_is_not_shown_as_clean(user: User, monkey
     await user.open('/lab-health-test')
     await user.should_see('No errors in what it reports')
     await user.should_see('absent is not zero')
+
+
+# ---------- service-level health roll-up ----------
+
+def test_a_container_with_no_healthcheck_is_unchecked_not_healthy():
+    """`docker ps` writes "(healthy)" only when the image declares a healthcheck. A bare
+    "Up 2 hours" says the process has not exited -- nothing more. Reading that as healthy
+    is the running-container-is-not-a-working-service lie in one line of code."""
+    assert lab_health_page._container_health('Up 2 hours') == lab_health_page.HEALTH_UNCHECKED
+    assert lab_health_page._container_health('Up 2 hours (healthy)') == lab_health_page.HEALTH_HEALTHY
+
+
+def test_container_health_separates_the_five_states():
+    h = lab_health_page._container_health
+    assert h('Up 3 days (unhealthy)') == lab_health_page.HEALTH_UNHEALTHY
+    assert h('Up 4 seconds (health: starting)') == lab_health_page.HEALTH_STARTING
+    assert h('Exited (137) 2 hours ago') == lab_health_page.HEALTH_DOWN
+    assert h('Restarting (1) 5 seconds ago') == lab_health_page.HEALTH_STARTING
+    assert h('') == lab_health_page.HEALTH_UNCHECKED
+
+
+def test_unhealthy_is_not_read_as_healthy_by_substring():
+    """'unhealthy' contains 'healthy'. Order of checks is load-bearing here."""
+    assert lab_health_page._container_health('Up (unhealthy)') == lab_health_page.HEALTH_UNHEALTHY
+
+
+def test_an_unchecked_container_is_not_coloured_as_verified():
+    from components import theme
+    assert lab_health_page._container_color('Up 2 hours') != theme.GREEN
+    assert lab_health_page._container_color('Up 2 hours (healthy)') == theme.GREEN
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_the_list_says_unchecked_rather_than_implying_health(user: User, monkeypatch):
+    status = dict(_HEALTHY_STATUS, containers=[
+        {'Names': 'plex', 'Status': 'Up 2 hours', 'Labels': 'com.docker.compose.project=media'},
+        {'Names': 'sonarr', 'Status': 'Up 3 days (healthy)',
+         'Labels': 'com.docker.compose.project=media'},
+    ])
+    _stub_page(monkeypatch, errors=_errors([]), status=status)
+    await user.open('/lab-health-test')
+    await user.should_see('no healthcheck declared')
+    await user.should_see('1 healthy')
+    await user.should_see('1 running, unchecked')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_unchecked_containers_do_not_rank_a_project_as_broken(user: User, monkeypatch):
+    """Sorting by "not green" would bury genuinely broken containers under the many that
+    simply never declared a healthcheck."""
+    status = dict(_HEALTHY_STATUS, containers=[
+        {'Names': 'a1', 'Status': 'Up 2 hours', 'Labels': 'com.docker.compose.project=quiet'},
+        {'Names': 'a2', 'Status': 'Up 2 hours', 'Labels': 'com.docker.compose.project=quiet'},
+        {'Names': 'b1', 'Status': 'Exited (1) 5 minutes ago',
+         'Labels': 'com.docker.compose.project=broken'},
+    ])
+    _stub_page(monkeypatch, errors=_errors([]), status=status)
+    await user.open('/lab-health-test')
+    await user.should_see('1 down')
+    await user.should_see('2 running, unchecked')
