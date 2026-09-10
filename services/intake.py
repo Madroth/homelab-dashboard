@@ -169,7 +169,13 @@ def _article_from_row(row) -> dict:
         'auto_generated': bool(auto_generated),
         'tags': [str(t) for t in json.loads(tags or '[]')],
         'suggested_tags': [str(t) for t in json.loads(suggested_tags or '[]')],
-        'raw_content': raw_content or '',
+        # Lowercased to match _article_from_frontmatter, because pages/intake.py:307
+        # searches with `term in a['raw_content']` against an already-lowered term. The
+        # index stores original case, so serving it raw made body search silently miss
+        # every capitalised word -- for every article the index covers, which is all of
+        # them. It still matched on title and tags, so it returned fewer results rather
+        # than none, which is why nothing noticed.
+        'raw_content': (raw_content or '').lower(),
         'content_type': content_type or '',
         'educational': bool(educational),
         'priority_score': priority_score,

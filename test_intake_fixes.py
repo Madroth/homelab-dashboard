@@ -5,6 +5,7 @@ Not permanent test infra -- exercises the code against isolated temp data (never
 real ~/projects/homelab-intake articles or the real intake_state.json)."""
 import asyncio
 import json
+import os
 import pathlib
 import textwrap
 import threading
@@ -1201,3 +1202,135 @@ async def test_a_failed_item_with_no_recorded_error_still_opens(user: User, isol
     user.find(marker='queue-failed-q2').click()
     await asyncio.sleep(0.3)
     await user.should_see('no error recorded')
+
+
+# ---------- the index fast path and the file fallback must agree ----------
+#
+# services/intake.py:list_articles() serves an article from the SQLite index when the index
+# covers it and by parsing the file when it does not, and the page cannot tell which produced
+# a given item. _article_from_row's own docstring says "the two must stay in step" -- which
+# nothing enforced until this test. A divergence would not crash: it would render some
+# articles subtly differently from others depending on index coverage, which is the failure
+# class this repo keeps paying for.
+
+def _build_index(db_path, articles_dir, filename, *, title, date_processed,
+                 priority_score=5.0, tags=None, educational=False, body=None):
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""CREATE TABLE articles (
+        file_path TEXT, title TEXT, date_processed TEXT, source_url TEXT, dup_of TEXT,
+        auto_generated INTEGER, tags TEXT, suggested_tags TEXT, content_type TEXT,
+        educational INTEGER, priority_score REAL, why_it_matters TEXT, status TEXT,
+        user_folders TEXT, body TEXT, raw_content TEXT)""")
+    path = os.path.join(str(articles_dir), filename)
+    # The real indexer stores the article's whole body, headings and all -- the snippet
+    # regex looks for '## Summary'. A stripped-down body here would fabricate a mismatch.
+    if body is None:
+        body = f'## Summary\n\nTest summary for {title}.\n'
+    conn.execute('INSERT INTO articles VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', (
+        path, title, date_processed, f'https://example.com/{filename}', None, 0,
+        json.dumps(tags or []), json.dumps([]), None, 1 if educational else 0,
+        priority_score, None, None, json.dumps([]), body,
+        (articles_dir / filename).read_text(encoding='utf-8')))
+    conn.commit()
+    conn.close()
+
+
+def test_index_path_and_file_path_describe_an_article_identically(tmp_path, monkeypatch):
+    articles_dir = tmp_path / 'articles'
+    articles_dir.mkdir()
+    _seed_article(articles_dir, '2026-05-05-101010-parity.md', title='Parity Article',
+                  date_processed='2026-05-05 10:10:10', priority_score=7, tags=['docker'])
+    monkeypatch.setattr(intake_service, 'ARTICLES_DIR', str(articles_dir))
+
+    # First: no index at all, so the file fallback produces the article.
+    monkeypatch.setattr(intake_service, 'INDEX_DB', str(tmp_path / 'absent.db'))
+    monkeypatch.setattr(intake_service, '_articles_cache',
+                        {'signature': None, 'articles': None})
+    from_file = intake_service.list_articles()
+    assert len(from_file) == 1, 'fallback did not produce the article'
+
+    # Then: an index covering the same file, so the fast path produces it instead.
+    db = tmp_path / 'articles.db'
+    _build_index(db, articles_dir, '2026-05-05-101010-parity.md', title='Parity Article',
+                 date_processed='2026-05-05 10:10:10', priority_score=7, tags=['docker'])
+    monkeypatch.setattr(intake_service, 'INDEX_DB', str(db))
+    monkeypatch.setattr(intake_service, '_articles_cache',
+                        {'signature': None, 'articles': None})
+    from_index = intake_service.list_articles()
+    assert len(from_index) == 1, 'index path did not produce the article'
+
+    assert from_index[0] == from_file[0], (
+        'the index fast path and the file fallback disagree about the same article; '
+        'the page cannot tell which served it, so this renders as an inconsistency '
+        'nobody can trace'
+    )
+
+
+def test_an_unreadable_index_falls_back_instead_of_emptying_the_page(tmp_path, monkeypatch):
+    """A blank page is a far worse failure than a slow one. A corrupt index must send
+    list_articles() back to parsing files, not report an empty archive."""
+    articles_dir = tmp_path / 'articles'
+    articles_dir.mkdir()
+    _seed_article(articles_dir, '2026-05-05-101010-parity.md', title='Parity Article',
+                  date_processed='2026-05-05 10:10:10')
+    monkeypatch.setattr(intake_service, 'ARTICLES_DIR', str(articles_dir))
+
+    corrupt = tmp_path / 'articles.db'
+    corrupt.write_bytes(b'this is not a sqlite database at all')
+    monkeypatch.setattr(intake_service, 'INDEX_DB', str(corrupt))
+    monkeypatch.setattr(intake_service, '_articles_cache',
+                        {'signature': None, 'articles': None})
+
+    articles = intake_service.list_articles()
+    assert len(articles) == 1
+    assert articles[0]['title'] == 'Parity Article'
+
+
+def test_the_index_does_not_serve_rows_from_a_different_articles_dir(tmp_path, monkeypatch):
+    """The index describes one directory. Pointed at another corpus it must contribute
+    nothing rather than mixing two unrelated archives into one list."""
+    articles_dir = tmp_path / 'articles'
+    articles_dir.mkdir()
+    other_dir = tmp_path / 'elsewhere'
+    other_dir.mkdir()
+    _seed_article(articles_dir, '2026-05-05-101010-here.md', title='Here',
+                  date_processed='2026-05-05 10:10:10')
+    _seed_article(other_dir, '2026-05-06-101010-there.md', title='There',
+                  date_processed='2026-05-06 10:10:10')
+
+    db = tmp_path / 'articles.db'
+    _build_index(db, other_dir, '2026-05-06-101010-there.md', title='There',
+                 date_processed='2026-05-06 10:10:10')
+
+    monkeypatch.setattr(intake_service, 'ARTICLES_DIR', str(articles_dir))
+    monkeypatch.setattr(intake_service, 'INDEX_DB', str(db))
+    monkeypatch.setattr(intake_service, '_articles_cache',
+                        {'signature': None, 'articles': None})
+
+    titles = [a['title'] for a in intake_service.list_articles()]
+    assert titles == ['Here'], f'foreign corpus leaked into the list: {titles}'
+
+
+def test_raw_content_is_lowercased_on_both_paths_because_search_depends_on_it(tmp_path,
+                                                                              monkeypatch):
+    """Parity alone would not catch both paths regressing together. pages/intake.py:307
+    does `term in a['raw_content']` with an already-lowered term, so this field carries a
+    contract of its own: it is a search index, not the article."""
+    articles_dir = tmp_path / 'articles'
+    articles_dir.mkdir()
+    _seed_article(articles_dir, '2026-05-05-101010-caps.md', title='Kubernetes At Home',
+                  date_processed='2026-05-05 10:10:10')
+    monkeypatch.setattr(intake_service, 'ARTICLES_DIR', str(articles_dir))
+
+    db = tmp_path / 'articles.db'
+    _build_index(db, articles_dir, '2026-05-05-101010-caps.md', title='Kubernetes At Home',
+                 date_processed='2026-05-05 10:10:10')
+    monkeypatch.setattr(intake_service, 'INDEX_DB', str(db))
+    monkeypatch.setattr(intake_service, '_articles_cache',
+                        {'signature': None, 'articles': None})
+
+    article = intake_service.list_articles()[0]
+    assert article['raw_content'] == article['raw_content'].lower()
+    # The capitalised word in the body must be findable by the lowered search term.
+    assert 'kubernetes at home' in article['raw_content']
