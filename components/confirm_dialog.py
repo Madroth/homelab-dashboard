@@ -3,11 +3,12 @@ from typing import Callable, Optional
 from nicegui import ui
 
 from components import theme
+from components.page_dialog import page_dialog
 
 
 async def confirm(title: str, message: str, *, confirm_label: str = 'Confirm',
                    danger: bool = False) -> bool:
-    with ui.dialog() as dialog, ui.card().style(
+    with page_dialog() as dialog, ui.card().style(
             f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:22px'):
         ui.label(title).style(f'font-size:15px;font-weight:700;color:{theme.TEXT}')
         ui.label(message).style(f'font-size:12.5px;color:{theme.TEXT_MUTED};margin-bottom:14px')

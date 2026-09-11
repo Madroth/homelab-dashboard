@@ -63,6 +63,10 @@ def fake_media_service(monkeypatch):
     monkeypatch.setattr(media_service, 'reject', _reject)
     monkeypatch.setattr(media_service, 'edit', _edit)
     monkeypatch.setattr(media_service, 'undo', _undo)
+    # Without this every page load read the REAL media-curator queue.db and stat'ed its
+    # rejected files on the NAS mount, despite the module docstring's promise -- and a slow
+    # NAS then decided whether a UI test passed. Tests that care override it.
+    monkeypatch.setattr(media_service, 'get_rejected', lambda *a, **kw: [])
     return queue
 
 
@@ -174,6 +178,112 @@ async def test_toggle_select_rebuilds_one_row_not_the_whole_queue(user: User, mo
     for i in untouched:
         assert _row_element_id(user, i) == before[i], (
             f'row {i} was rebuilt too -- this is the full-list rebuild the fix removed')
+
+
+# ---------- an open dialog survives the page's own poll ----------
+#
+# Captured 2026-09-11 by the failure recorder in conftest.py, the first time a failing run
+# of this file was ever kept: the confirm and edit dialogs had vanished between the click
+# and the next step. NiceGUI ties a dialog's lifetime to an invisible canary element placed
+# wherever the click happened -- here, inside a queue row -- and deletes the dialog when
+# that canary is collected. reload() rebuilt the whole queue on its 5s poll, so any poll
+# landing while a dialog was open destroyed it, and the handler awaiting it hung forever.
+# Under load the tests straddle a poll more often, which is the flake; on the live page it
+# was your Edit Title box disappearing mid-typing.
+#
+# Two fixes, tested separately: components/page_dialog.py anchors dialogs to the page, and
+# the poll no longer rebuilds a queue that has not changed. The dialog tests below make the
+# queue change on purpose, so they still prove the first fix with the second in place.
+
+async def _outlast_a_poll(user, queue):
+    """Something arrives in the queue -- the daemon's everyday business -- so the next poll
+    genuinely rebuilds the list rather than skipping an unchanged one. Waits until it has."""
+    queue.append(_item('arrived'))
+    await user.should_see('Title arrived', retries=70)   # the poll is every 5s
+    import gc
+    gc.collect()   # the canary may sit in a reference cycle; don't let timing hide the bug
+    await asyncio.sleep(0.2)
+
+
+@pytest.mark.nicegui_main_file('test_media_fixes.py')
+async def test_an_open_edit_dialog_survives_the_poll(user: User, fake_media_service):
+    await user.open('/media-test')
+    await user.should_see('Title 0')
+
+    user.find(marker='edit-0').click()
+    await user.should_see(kind=ui.input)
+    await _outlast_a_poll(user, fake_media_service)
+
+    await user.should_see(kind=ui.input, retries=1)
+    title_input = user.find(kind=ui.input)
+    with user.client:
+        for el in title_input.elements:
+            el.value = 'Typed Through A Poll'
+    user.find(content='Save').click()
+    # Not should_see(): the dialog's own input shows this text until it is discarded.
+    await user.should_see(content='Typed Through A Poll', kind=ui.label)
+    assert fake_media_service[0]['proposed_title'] == 'Typed Through A Poll'
+
+
+@pytest.mark.nicegui_main_file('test_media_fixes.py')
+async def test_an_open_reject_confirmation_survives_the_poll(user: User, fake_media_service):
+    await user.open('/media-test')
+    await user.should_see('Title 0')
+
+    user.find(marker='reject-0').click()
+    await user.should_see(marker='confirm-dialog-confirm')
+    await _outlast_a_poll(user, fake_media_service)
+
+    await user.should_see(marker='confirm-dialog-confirm', retries=1)
+    user.find(marker='confirm-dialog-confirm').click()
+    await user.should_not_see('Title 0')
+    assert all(it['id'] != '0' for it in fake_media_service)
+
+
+@pytest.mark.nicegui_main_file('test_media_fixes.py')
+async def test_a_poll_that_finds_nothing_new_rebuilds_nothing(user: User, fake_media_service):
+    """The poll used to tear down and rebuild every row every five seconds whether or not
+    anything had changed -- deleting whichever button you were reaching for."""
+    await user.open('/media-test')
+    await user.should_see('Title 0')
+    await asyncio.sleep(0.5)
+    before = [_row_element_id(user, i) for i in range(3)]
+
+    await asyncio.sleep(5.5)   # at least one poll
+
+    assert [_row_element_id(user, i) for i in range(3)] == before
+
+
+@pytest.mark.nicegui_main_file('test_media_fixes.py')
+async def test_a_closed_dialog_is_deleted_not_just_hidden(user: User, fake_media_service):
+    """Anchoring dialogs to the page means nothing else will ever clean them up, so
+    page_dialog() must -- or every detail dialog opened in a long-lived Lab Health tab
+    stays in it, hidden, until the tab closes."""
+    await user.open('/media-test')
+    await user.should_see('Title 0')
+    await asyncio.sleep(0.5)   # let the initial load settle
+    with user.client:
+        before = len(list(user.current_layout.descendants()))
+
+    user.find(marker='edit-0').click()
+    await user.should_see(kind=ui.input)
+    user.find(content='Cancel').click()
+    await asyncio.sleep(1.0)   # past page_dialog's close transition
+
+    with user.client:
+        assert len(list(user.current_layout.descendants())) == before
+
+
+def test_no_page_creates_a_dialog_the_poll_can_delete():
+    """page_dialog() fixes this once; a bare ui.dialog() anywhere a click handler can
+    reach reintroduces it. Every page here rebuilds on a timer."""
+    import pathlib
+    offenders = [f'{p}:{n}' for p in [*pathlib.Path('pages').glob('*.py'),
+                                      *pathlib.Path('components').glob('*.py')]
+                 if p.name != 'page_dialog.py'
+                 for n, line in enumerate(p.read_text().splitlines(), 1)
+                 if 'ui.dialog(' in line]
+    assert not offenders, f'use components.page_dialog.page_dialog() instead: {offenders}'
 
 
 # ---------- undo(): the filesystem and the database must move together ----------

@@ -257,7 +257,9 @@ def build(on_navigate: Callable[[str], None]):
             _minecraft_card(state['minecraft'])
             render_cards()
 
-    ui.timer(10.0, _refresh_minecraft)
+    # immediate=False: the once-timers are the initial read; a repeating timer otherwise
+    # also fires at once, doubling every read on page open.
+    ui.timer(10.0, _refresh_minecraft, immediate=False)
     ui.timer(0.1, _refresh_minecraft, once=True)
-    ui.timer(15.0, reload_all)
+    ui.timer(15.0, reload_all, immediate=False)
     ui.timer(0.1, reload_all, once=True)

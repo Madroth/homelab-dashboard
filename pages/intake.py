@@ -6,6 +6,7 @@ from nicegui import run, ui
 
 from components import ai_context, discuss_panel, live_state, theme
 from components.confirm_dialog import confirm
+from components.page_dialog import page_dialog
 from components.util import capture_client, client_alive, notify_on
 from services import fulltext, intake, intake_state, plane
 from services.ai import discuss
@@ -126,7 +127,7 @@ def _badge(article: dict) -> tuple[str, str]:
 
 
 async def _prompt_folder_choice(folders: list[str]) -> str | None:
-    with ui.dialog() as dialog, ui.card().style(
+    with page_dialog() as dialog, ui.card().style(
             f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);border-radius:12px;'
             f'padding:22px;width:360px'):
         ui.label('Move to folder').style(f'font-size:15px;font-weight:700;color:{theme.TEXT};margin-bottom:10px')
@@ -145,7 +146,7 @@ async def _prompt_folder_choice(folders: list[str]) -> str | None:
 
 
 async def _show_cheatsheet():
-    with ui.dialog() as dialog, ui.card().style(
+    with page_dialog() as dialog, ui.card().style(
             f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);border-radius:12px;'
             f'padding:22px;width:340px'):
         ui.label('Keyboard shortcuts').style(f'font-size:15px;font-weight:700;color:{theme.TEXT};margin-bottom:12px')
@@ -401,7 +402,7 @@ def build():
         render_bulk_bar.refresh()
 
     async def create_new_folder():
-        with ui.dialog() as dialog, ui.card().style(
+        with page_dialog() as dialog, ui.card().style(
                 f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);border-radius:12px;'
                 f'padding:22px;width:320px'):
             ui.label('New folder').style(f'font-size:15px;font-weight:700;color:{theme.TEXT};margin-bottom:10px')
@@ -1639,7 +1640,7 @@ def build():
         retried it -- so the one thing you could not do with a failure was read it.
         (Chris, 2026-08-04.) Retry still lives here, one click further in."""
         error_text = item.get('last_error') or 'Failed after retries (no error recorded).'
-        with ui.dialog() as dialog, ui.card().style(
+        with page_dialog() as dialog, ui.card().style(
                 f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);'
                 f'border-radius:12px;padding:20px;min-width:620px;max-width:820px'):
             with ui.row().classes('items-center no-wrap w-full').style('gap:10px'):

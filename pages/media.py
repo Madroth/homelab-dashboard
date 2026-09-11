@@ -2,7 +2,8 @@ from nicegui import run, ui
 
 from components import ai_context, live_state, theme
 from components.confirm_dialog import confirm
-from components.util import client_alive
+from components.page_dialog import page_dialog
+from components.util import capture_client, client_alive, notify_on
 from services import media
 
 MEDIA_TYPE_VISUALS = {
@@ -35,7 +36,7 @@ MEDIA_TYPES = [('movie', 'Movie'), ('tv_show', 'TV Show'), ('ebook', 'Ebook'),
 
 async def _show_approved_details(item: dict, on_changed):
     meta = item.get('metadata') or {}
-    with ui.dialog() as dialog, ui.card().style(
+    with page_dialog() as dialog, ui.card().style(
             f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);border-radius:12px;'
             f'padding:22px;width:550px;max-height:85vh'):
         ui.label('Media Details').style(f'font-size:15px;font-weight:700;color:{theme.TEXT}')
@@ -122,7 +123,7 @@ async def _show_approved_details(item: dict, on_changed):
 
 
 async def _prompt_edit_title(current_title: str) -> str | None:
-    with ui.dialog() as dialog, ui.card().style(
+    with page_dialog() as dialog, ui.card().style(
             f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:22px'):
         ui.label('Edit Title').style(f'font-size:15px;font-weight:700;color:{theme.TEXT};margin-bottom:10px')
         title_input = ui.input(value=current_title).style('width:100%').props('outlined dense')
@@ -337,19 +338,27 @@ def build():
         for item in queue:
             _get_row_refreshable(item['id'])()
 
+    # Every row handler captures its client before its first await. The row it was clicked
+    # from can be rebuilt while it waits -- by its own reload, the 5s poll, or another tab --
+    # and after that context.client no longer resolves for the rest of the handler, so a
+    # bare client_alive() reads "tab closed" and the result never renders. See
+    # components/util.capture_client().
+
     async def do_approve(item_id):
+        client = capture_client()
         result = await run.io_bound(media.approve, str(item_id))
         if result is None:
             return
         success, error = result
         if not success:
-            ui.notify(f'Approve failed: {error}', type='negative')
+            notify_on(client, f'Approve failed: {error}', type='negative')
         else:
-            ui.notify('Approved.', type='positive')
-        await reload(item_id)
-        live_state.refresh_all(exclude='media')
+            notify_on(client, 'Approved.', type='positive')
+        await reload(item_id, client=client)
+        live_state.refresh_all(exclude='media', client=client)
 
     async def do_reject(item_id):
+        client = capture_client()
         # Reject stopped deleting on 2026-08-22 -- it moves the file to
         # /mnt/Multimedia/Rejected and leaves it for a human. Saying "cannot be
         # undone" would now be false, and would make people hesitate over an
@@ -364,13 +373,14 @@ def build():
             return
         success, error = result
         if not success:
-            ui.notify(f'Reject failed: {error}', type='negative')
+            notify_on(client, f'Reject failed: {error}', type='negative')
         else:
-            ui.notify('Rejected.', type='positive')
-        await reload(item_id)
-        live_state.refresh_all(exclude='media')
+            notify_on(client, 'Rejected.', type='positive')
+        await reload(item_id, client=client)
+        live_state.refresh_all(exclude='media', client=client)
 
     async def do_edit(item_id, current_title):
+        client = capture_client()
         new_title = await _prompt_edit_title(current_title)
         if not new_title or new_title == current_title:
             return
@@ -379,11 +389,12 @@ def build():
             return
         success, error = result
         if not success:
-            ui.notify(f'Edit failed: {error}', type='negative')
-        await reload(item_id)
-        live_state.refresh_all(exclude='media')
+            notify_on(client, f'Edit failed: {error}', type='negative')
+        await reload(item_id, client=client)
+        live_state.refresh_all(exclude='media', client=client)
 
     async def bulk(action: str):
+        client = capture_client()
         ids = list(state['selected_ids'])
         if action == 'reject' and not await confirm(
                 'Reject all selected?', f'{len(ids)} item(s) will be rejected. This cannot be undone.',
@@ -394,36 +405,51 @@ def build():
             return
         failed = [r for r in results if not r['success']]
         if failed:
-            ui.notify(f'{len(failed)} of {len(ids)} failed', type='negative')
+            notify_on(client, f'{len(failed)} of {len(ids)} failed', type='negative')
         else:
-            ui.notify(f'{action.capitalize()}d {len(ids)} item(s).', type='positive')
+            notify_on(client, f'{action.capitalize()}d {len(ids)} item(s).', type='positive')
         state['selected_ids'].clear()
-        await reload()
-        live_state.refresh_all(exclude='media')
+        await reload(client=client)
+        live_state.refresh_all(exclude='media', client=client)
 
-    async def reload(changed_id=None):
+    async def reload(changed_id=None, *, client=None, poll=False):
         """changed_id, when given, names the single item a caller knows it just
         mutated (approve/reject/edit/reclassify/undo). If the refetched queue's
         filtered membership and order didn't actually change -- the common case for a
         single-item status/title edit -- refresh just that one row instead of paying
         render_queue.refresh()'s full-list rebuild cost. Callers that don't know a
-        specific id (bulk actions, the periodic poll, initial load) always get the
-        full, definitely-correct refresh."""
+        specific id (bulk actions, initial load) always get the full, definitely-correct
+        refresh.
+
+        poll=True is the 5s timer, and it rebuilds nothing unless the data changed. It used
+        to rebuild the whole queue every five seconds regardless, which deleted whatever
+        button you were about to click and, until page_dialog(), whatever dialog you had
+        open.
+
+        The queue renders before the rejected list is read, because that read stats each
+        rejected file on the NAS mount -- a CIFS path that can hang for minutes when the
+        NAS stops answering -- and the row you just approved should not wait on it."""
+        if client is None:
+            client = capture_client()
         before_ids = [i['id'] for i in filtered_queue()]
         queue = await run.io_bound(media.get_queue)
-        if queue is None:
+        if queue is None or not client_alive(client):
             return
-        if not client_alive():
+        if not (poll and queue == state['queue']):
+            state['queue'] = queue
+            after_ids = [i['id'] for i in filtered_queue()]
+            if changed_id is not None and before_ids == after_ids and changed_id in row_refreshables:
+                _get_row_refreshable(changed_id).refresh()
+            else:
+                render_queue.refresh()
+            render_bulk_bar.refresh()
+
+        rejected = await run.io_bound(media.get_rejected)
+        if rejected is None or not client_alive(client):
             return
-        state['queue'] = queue
-        state['rejected'] = await run.io_bound(media.get_rejected) or []
-        render_rejected.refresh()
-        after_ids = [i['id'] for i in filtered_queue()]
-        if changed_id is not None and before_ids == after_ids and changed_id in row_refreshables:
-            _get_row_refreshable(changed_id).refresh()
-        else:
-            render_queue.refresh()
-        render_bulk_bar.refresh()
+        if not (poll and rejected == state['rejected']):
+            state['rejected'] = rejected
+            render_rejected.refresh()
 
     def get_context_summary():
         queue = state['queue']
@@ -469,4 +495,6 @@ def build():
             render_queue()
 
     ui.timer(0.05, reload, once=True)
-    ui.timer(5.0, reload)
+    # immediate=False: NiceGUI fires a repeating timer at once by default, which made every
+    # page open run two reloads concurrently with the one above.
+    ui.timer(5.0, lambda: reload(poll=True), immediate=False)

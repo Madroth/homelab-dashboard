@@ -18,6 +18,7 @@ from nicegui import run, ui
 
 from components import ai_context, theme
 from components.util import client_alive
+from components.page_dialog import page_dialog
 from services import system
 
 TOOLS = [
@@ -389,7 +390,7 @@ def build():
                  + ' · '.join(parts)).style(f'font-size:10.5px;color:{theme.TEXT_MUTED}')
 
     def show_error_detail(entry: dict):
-        with ui.dialog() as dialog, ui.card().style(
+        with page_dialog() as dialog, ui.card().style(
                 f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);'
                 f'border-radius:12px;padding:20px;min-width:660px;max-width:840px'):
             color = SEVERITY_COLORS.get(entry['severity'], theme.TEXT_MUTED)
@@ -523,7 +524,7 @@ def build():
 
     def show_unit_detail(unit: str, manager: str):
         detail = system.get_unit_detail(unit, manager)
-        with ui.dialog() as dialog, ui.card().style(
+        with page_dialog() as dialog, ui.card().style(
                 f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);'
                 f'border-radius:12px;padding:20px;min-width:680px;max-width:880px'):
             with ui.row().classes('items-center no-wrap w-full').style('gap:10px'):
@@ -907,7 +908,7 @@ def build():
 
     def show_container_detail(name: str):
         detail = system.get_container_detail(name)
-        with ui.dialog() as dialog, ui.card().style(
+        with page_dialog() as dialog, ui.card().style(
                 f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);'
                 f'border-radius:12px;padding:20px;min-width:700px;max-width:900px'):
             with ui.row().classes('items-center no-wrap w-full').style('gap:10px'):
@@ -1166,7 +1167,7 @@ def build():
 
     def show_resource_detail(kind: str):
         res = state['resources'] or {}
-        with ui.dialog() as dialog, ui.card().style(
+        with page_dialog() as dialog, ui.card().style(
                 f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);'
                 f'border-radius:12px;padding:20px;min-width:640px;max-width:820px'):
             titles = {'cpu': 'CPU', 'memory': 'Memory', 'disks': 'Disks', 'temps': 'Temperature'}
@@ -1589,13 +1590,16 @@ def build():
     ui.timer(0.2, refresh_network, once=True)
     ui.timer(0.3, refresh_smart, once=True)
     ui.timer(0.4, refresh_backups, once=True)
-    ui.timer(15.0, refresh_status)
-    ui.timer(15.0, refresh_resources)
-    ui.timer(30.0, refresh_errors)
+    # immediate=False on every poll: the once-timers above are the initial read, and
+    # NiceGUI fires a repeating timer at once by default -- so each reader ran twice,
+    # concurrently, on every page open.
+    ui.timer(15.0, refresh_status, immediate=False)
+    ui.timer(15.0, refresh_resources, immediate=False)
+    ui.timer(30.0, refresh_errors, immediate=False)
     # Slower than the rest: every probe is a network round trip with a timeout budget.
-    ui.timer(60.0, refresh_network)
-    ui.timer(600.0, refresh_smart)
-    ui.timer(600.0, refresh_backups)
+    ui.timer(60.0, refresh_network, immediate=False)
+    ui.timer(600.0, refresh_smart, immediate=False)
+    ui.timer(600.0, refresh_backups, immediate=False)
 
     def tick_stamps():
         if not client_alive():

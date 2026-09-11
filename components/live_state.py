@@ -32,6 +32,13 @@ def refresh_all(exclude: str | None = None, client=None) -> None:
         if key == exclude:
             continue
         try:
-            refresh()
+            # The registered callables create a ui.timer, which needs a live slot. From a
+            # handler whose own row is gone, the ambient one is dead -- and the exception
+            # below used to swallow that, so the other pages silently never refreshed.
+            if client is not None:
+                with client:
+                    refresh()
+            else:
+                refresh()
         except Exception:
             pass

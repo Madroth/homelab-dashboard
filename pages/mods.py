@@ -2,6 +2,7 @@ from nicegui import run, ui
 
 from components import ai_context, live_state, theme
 from components.util import client_alive
+from components.page_dialog import page_dialog
 from services import mods
 
 
@@ -10,7 +11,7 @@ def _fmt_date(d):
 
 
 async def _show_review(name: str, review_text: str):
-    with ui.dialog() as dialog, ui.card().style(
+    with page_dialog() as dialog, ui.card().style(
             f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);border-radius:12px;'
             f'padding:22px;width:600px;max-height:80vh'):
         ui.label('AI Review').style(f'font-size:15px;font-weight:700;color:{theme.TEXT}')
@@ -23,7 +24,7 @@ async def _show_review(name: str, review_text: str):
 
 
 async def _prompt_reject_reason(name: str) -> str | None:
-    with ui.dialog() as dialog, ui.card().style(
+    with page_dialog() as dialog, ui.card().style(
             f'background:{theme.CARD_BG};border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:22px'):
         ui.label('Reject mod').style(f'font-size:15px;font-weight:700;color:{theme.TEXT}')
         ui.label(f'{name} — this moves the submission to the review folder.').style(
