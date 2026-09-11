@@ -79,38 +79,10 @@ def _get_or_create_label(project_id: str | None = None) -> str | None:
         return None
 
 
-def _describe(article: dict, summary: str) -> tuple[str, str]:
-    """The to-do's name and description for an article -- one builder, so a send and a
-    later update cannot drift into writing different shapes."""
-    body = summary or article.get('why_it_matters') or article.get('snippet') or ''
-    source = article.get('source') or ''
-    safe_body = html.escape(body).replace('\n', '<br/>')
-    description_html = f"<p>{safe_body}</p>"
-    if source:
-        description_html += f'<p><a href="{html.escape(source)}">{html.escape(source)}</a></p>'
-    return article['title'], description_html
-
-
-def _sha(*parts) -> str:
-    return hashlib.sha256('\0'.join(p or '' for p in parts).encode()).hexdigest()
-
-
-def _held(issue: dict) -> str:
-    """Fingerprint of the two fields an update may overwrite, AS PLANE STORES THEM.
-
-    Not as we sent them: Plane rewrites description_html on save (a `<p>` sent comes back
-    wrapped in `<div>`, observed 2026-09-11), so comparing against what we sent would read
-    every to-do as hand-edited and no update would ever be allowed to refresh one.
-    """
-    return _sha(issue.get('name'), issue.get('description_html'))
-
-
 def send_article_to_plane(article: dict, summary: str, project_id: str | None = None) -> dict:
     """Creates a Plane issue from an article, then reads it back to confirm it exists.
 
-    Returns {'created', 'verified', 'issue_id', 'already_existed', 'fingerprint', 'error'}.
-    `fingerprint` is what update_article_todo() later needs to tell whether the to-do has
-    been edited in Plane since; None whenever this call cannot vouch for that. `created`
+    Returns {'created', 'verified', 'issue_id', 'already_existed', 'error'}. `created`
     means Plane holds an issue for this article; `verified` means a follow-up GET found it
     actually there. They are reported separately on purpose: a read-back that fails after a
     successful create must not be mistaken for "not sent", or the caller retries and files
@@ -130,8 +102,15 @@ def send_article_to_plane(article: dict, summary: str, project_id: str | None = 
 
     try:
         label_id = _get_or_create_label(project_id)
-        name, description_html = _describe(article, summary)
-        payload = {'name': name, 'description_html': description_html}
+
+        body = summary or article.get('why_it_matters') or article.get('snippet') or ''
+        source = article.get('source') or ''
+        safe_body = html.escape(body).replace('\n', '<br/>')
+        description_html = f"<p>{safe_body}</p>"
+        if source:
+            description_html += f'<p><a href="{html.escape(source)}">{html.escape(source)}</a></p>'
+
+        payload = {'name': article['title'], 'description_html': description_html}
         # The external_id is the ONLY thing standing between a lost response and a
         # duplicate to-do, so it is never optional. An article with no id used to send
         # without one, quietly dropping back to the un-idempotent behaviour this exists
@@ -160,15 +139,11 @@ def send_article_to_plane(article: dict, summary: str, project_id: str | None = 
                 # forever, so report it as a real outcome rather than a silent link.
                 return {'created': True, 'already_existed': True, 'issue_id': None,
                         'verified': False, 'project_id': project_id or PLANE_PROJECT_ID,
-                        'fingerprint': None,
                         'error': 'Plane reports this article is already filed but did not '
                                  'return the issue id, so it could not be linked.'}
-            # No fingerprint: this call did not write that issue, and nothing here knows
-            # whether someone has edited it since. An update will add a comment instead.
             return {'created': True, 'already_existed': True, 'issue_id': existing,
                     'error': None, 'project_id': project_id or PLANE_PROJECT_ID,
-                    'fingerprint': None,
-                    'verified': issue_status(existing, project_id) == 'present'}
+                    'verified': _issue_exists(existing, project_id)}
         resp.raise_for_status()
         issue_id = resp.json().get('id')
     except Exception as e:
@@ -177,96 +152,16 @@ def send_article_to_plane(article: dict, summary: str, project_id: str | None = 
         # the caller's own error handling -- leaving its spinner running and saying nothing.
         return {'created': False, 'verified': False, 'issue_id': None,
                 'already_existed': False, 'project_id': project_id or PLANE_PROJECT_ID,
-                'fingerprint': None, 'error': f'{type(e).__name__}: {e}'}
-
-    # The read-back doubles as the fingerprint: what Plane actually stored, right after we
-    # wrote it. Without a successful read-back there is nothing to vouch for.
-    status, issue = _fetch_issue(issue_id, project_id)
-    verified = status == 'present'
-    return {'created': True, 'already_existed': False, 'issue_id': issue_id, 'error': None,
-            'project_id': project_id or PLANE_PROJECT_ID, 'verified': verified,
-            'fingerprint': ({'sent': _sha(name, description_html), 'held': _held(issue)}
-                            if verified else None)}
-
-
-UPDATE_NOTE_HTML = {
-    'edited': ('<p><em>The article behind this to-do was updated in homelab-intake. The to-do '
-               'had been edited here since the dashboard last wrote it, so this is added as a '
-               'comment rather than replacing anything.</em></p>'),
-    'untracked': ('<p><em>The article behind this to-do was updated in homelab-intake. The '
-                  'dashboard cannot tell whether this to-do has been edited here, so this is '
-                  'added as a comment rather than replacing anything.</em></p>'),
-}
-
-
-def update_article_todo(article: dict, summary: str, issue_id: str,
-                        project_id: str | None = None, fingerprint: dict | None = None) -> dict:
-    """Brings a sent to-do up to date with its article, never overwriting a hand edit.
-
-    Chris's call, 2026-09-11: refresh the to-do's name and description, but only if Plane
-    still holds exactly what the dashboard last wrote there. If anyone has edited either
-    field in Plane since -- or the to-do predates fingerprints, so nobody can say -- the
-    update is posted as a comment instead. State, labels, assignees and comments are never
-    touched either way.
-
-    `fingerprint` is {'sent', 'held'} as recorded by the last successful write: `sent` the
-    content we last pushed (so an unchanged article is a no-op rather than a duplicate
-    comment), `held` what Plane stored afterwards (see _held()).
-
-    Returns {'outcome', 'fingerprint', 'error'} (+ 'reason' when commented), outcome one of:
-      'refreshed'  name + description replaced
-      'commented'  the update went in as a comment -- reason 'edited' (Plane was changed
-                   since our write) or 'untracked' (no fingerprint, so nobody can say)
-      'unchanged'  nothing new since the last write; nothing sent
-      'gone'       Plane answered 404 -- the caller may clear the link, as issue_status()
-      'unknown'    Plane did not answer; nothing was changed
-      'failed'     a write failed; the stored fingerprint is returned unchanged
-
-    A window remains between the read and the PATCH in which a hand edit could land; Plane
-    offers no conditional write to close it. It is the width of one request.
-    """
-    if not all([PLANE_API_KEY, PLANE_API_URL, PLANE_WORKSPACE_SLUG,
-                project_id or PLANE_PROJECT_ID]):
-        return {'outcome': 'unknown', 'fingerprint': fingerprint,
-                'error': 'Plane is not configured (missing values in homelab-dashboard/.env).'}
-    try:
-        name, description_html = _describe(article, summary)
-        sent = _sha(name, description_html)
-        status, issue = _fetch_issue(issue_id, project_id)
-        if status == 'gone':
-            return {'outcome': 'gone', 'fingerprint': None, 'error': None}
-        if status != 'present':
-            return {'outcome': 'unknown', 'fingerprint': fingerprint,
-                    'error': 'HomeLab did not answer, so nothing was changed.'}
-        if fingerprint and fingerprint.get('sent') == sent:
-            return {'outcome': 'unchanged', 'fingerprint': fingerprint, 'error': None}
-
-        if fingerprint and fingerprint.get('held') == _held(issue):
-            resp = requests.patch(f"{_base_url(project_id)}/issues/{issue_id}/",
-                                  headers=_headers(), timeout=30,
-                                  json={'name': name, 'description_html': description_html})
-            resp.raise_for_status()
-            status, issue = _fetch_issue(issue_id, project_id)
-            if status != 'present':
-                # Written, but unconfirmed -- so no fingerprint to vouch for, and the next
-                # update will comment rather than risk overwriting.
-                return {'outcome': 'refreshed', 'fingerprint': {'sent': sent, 'held': None},
-                        'error': 'Updated, but the to-do could not be read back to confirm it.'}
-            return {'outcome': 'refreshed', 'fingerprint': {'sent': sent, 'held': _held(issue)},
-                    'error': None}
-
-        reason = 'edited' if (fingerprint or {}).get('held') else 'untracked'
-        resp = requests.post(f"{_base_url(project_id)}/issues/{issue_id}/comments/",
-                             headers=_headers(), timeout=30,
-                             json={'comment_html': UPDATE_NOTE_HTML[reason] + description_html})
-        resp.raise_for_status()
-        # `held` deliberately stays as it was. Recording the hand-edited version as ours
-        # would let the NEXT update overwrite it.
-        return {'outcome': 'commented', 'reason': reason, 'error': None,
-                'fingerprint': {'sent': sent, 'held': (fingerprint or {}).get('held')}}
-    except Exception as e:  # noqa: BLE001 -- same reasoning as send_article_to_plane
-        return {'outcome': 'failed', 'fingerprint': fingerprint,
                 'error': f'{type(e).__name__}: {e}'}
+
+    return {'created': True, 'already_existed': False, 'issue_id': issue_id, 'error': None,
+            'project_id': project_id or PLANE_PROJECT_ID,
+            'verified': _issue_exists(issue_id, project_id)}
+
+
+def _issue_exists(issue_id: str | None, project_id: str | None = None) -> bool:
+    """True if Plane can still hand back the issue we were just told it created."""
+    return issue_status(issue_id, project_id) == 'present'
 
 
 def issue_status(issue_id: str | None, project_id: str | None = None) -> str:
@@ -280,33 +175,27 @@ def issue_status(issue_id: str | None, project_id: str | None = None) -> str:
     stating it has no such issue -- is allowed to mean gone; everything else is unknown
     and changes nothing.
     """
-    return _fetch_issue(issue_id, project_id)[0]
-
-
-def _fetch_issue(issue_id: str | None, project_id: str | None = None) -> tuple[str, dict | None]:
-    """issue_status() with the issue attached when it is 'present'. Same rules."""
     if not issue_id:
-        return 'gone', None
+        return 'gone'
     if not all([PLANE_API_KEY, PLANE_API_URL, PLANE_WORKSPACE_SLUG,
                 project_id or PLANE_PROJECT_ID]):
-        return 'unknown', None
-    # The project matters as much as the id. A 'gone' from here is allowed to DELETE the
-    # article's only link to its to-do, and an issue that lives in
+        return 'unknown'
+    # The project matters as much as the id. This function is allowed to DELETE the
+    # article's only link to its to-do when it reads 'gone', and an issue that lives in
     # another project answers 404 from the default one -- indistinguishable from deleted.
     # Asking the wrong project would orphan a live to-do and mark the article unsent.
     try:
         resp = requests.get(f"{_base_url(project_id)}/issues/{issue_id}/",
                             headers=_headers(), timeout=15)
     except requests.RequestException:
-        return 'unknown', None
+        return 'unknown'
     if resp.status_code == 404:
-        return 'gone', None
+        return 'gone'
     if resp.status_code == 200:
         try:
-            issue = resp.json()
+            # A 200 carrying some other id is not an answer about this one -- don't act.
+            return 'present' if resp.json().get('id') == issue_id else 'unknown'
         except ValueError:
-            return 'unknown', None
-        # A 200 carrying some other id is not an answer about this one -- don't act.
-        return ('present', issue) if issue.get('id') == issue_id else ('unknown', None)
-    return 'unknown', None  # 401/403/5xx: Plane is not saying the issue is gone, only
-                            # that it will not answer right now.
+            return 'unknown'
+    return 'unknown'  # 401/403/5xx: Plane is not saying the issue is gone, only that it
+                      # will not answer right now.

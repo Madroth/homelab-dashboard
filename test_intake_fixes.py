@@ -954,19 +954,14 @@ class _FakeResponse:
         return self._payload
 
 
-def _stub_plane(monkeypatch, *, post, get, patch=None):
+def _stub_plane(monkeypatch, *, post, get):
     """Points services.plane at fake HTTP, with config filled in so the real .env values
     (and the real Plane instance) are never involved."""
     for name in ('PLANE_API_KEY', 'PLANE_API_URL', 'PLANE_WORKSPACE_SLUG', 'PLANE_PROJECT_ID'):
         monkeypatch.setattr(plane_service, name, 'stub')
     monkeypatch.setattr(plane_service, '_get_or_create_label', lambda *a, **kw: None)
-
-    def _no_patch(*a, **kw):
-        raise AssertionError('PATCH was not expected here')
-
     monkeypatch.setattr(plane_service, 'requests',
                         type('R', (), {'post': staticmethod(post), 'get': staticmethod(get),
-                                       'patch': staticmethod(patch or _no_patch),
                                        'RequestException': Exception})())
 
 
@@ -978,10 +973,8 @@ def test_send_marks_verified_when_the_issue_reads_back(monkeypatch):
     # project_id is part of the result on purpose: the caller records it so a later
     # issue_status() asks the project the to-do actually went to. Asking the default one
     # would read a 404 as "deleted" and orphan a live to-do.
-    fingerprint = result.pop('fingerprint')
     assert result == {'created': True, 'verified': True, 'already_existed': False,
                       'issue_id': 'new-issue', 'project_id': 'stub', 'error': None}
-    assert set(fingerprint) == {'sent', 'held'}
 
 
 def test_send_keeps_the_issue_id_when_the_read_back_fails(monkeypatch):
@@ -1512,240 +1505,3 @@ async def test_sending_records_which_project_the_todo_went_to(user: User, isolat
     assert recorded, (
         f'project not recorded: '
         f'{state_file.read_text() if state_file.exists() else "(no state file)"!r}')
-
-
-# ---------- updating a sent to-do: refresh, never clobber (Chris's call, 2026-09-11) ----------
-#
-# A sent to-do used to be write-once. update_article_todo() may replace its name and
-# description only while Plane still holds exactly what the dashboard last wrote; any hand
-# edit there turns the update into a comment. The fingerprint is taken from what Plane
-# STORES, because Plane rewrites description_html on save -- `<p>` comes back as
-# `<div><p>` -- so a fingerprint of what we sent would read every to-do as edited.
-
-_ARTICLE = {'id': 'a.md', 'title': 'T', 'source': 'https://x/'}
-
-
-class _PlaneDouble:
-    """Just enough of Plane: one issue whose stored HTML is rewritten on every write, the
-    way the real one does it, plus a record of every write made."""
-
-    def __init__(self, name='T', description_html='<div><p>summary</p></div>'):
-        self.issue = {'id': 'issue-1', 'name': name, 'description_html': description_html}
-        self.writes = []
-        self.get_status = 200
-
-    def get(self, url, **kw):
-        return _FakeResponse(self.get_status, dict(self.issue) if self.get_status == 200 else {})
-
-    def post(self, url, json=None, **kw):
-        self.writes.append(('POST', url, json))
-        if url.endswith('/comments/'):
-            return _FakeResponse(201, {'id': 'comment-1'})
-        self.issue.update(name=json['name'], description_html=f"<div>{json['description_html']}</div>")
-        return _FakeResponse(201, {'id': 'issue-1'})
-
-    def patch(self, url, json=None, **kw):
-        self.writes.append(('PATCH', url, json))
-        self.issue.update(name=json['name'], description_html=f"<div>{json['description_html']}</div>")
-        return _FakeResponse(200, dict(self.issue))
-
-    def install(self, monkeypatch):
-        _stub_plane(monkeypatch, post=self.post, get=self.get, patch=self.patch)
-        return self
-
-
-def _sent(monkeypatch, plane):
-    result = plane_service.send_article_to_plane(_ARTICLE, 'summary')
-    assert result['verified'] and result['fingerprint'], result
-    plane.writes.clear()
-    return result['fingerprint']
-
-
-def test_a_send_fingerprints_what_plane_stored_not_what_was_sent(monkeypatch):
-    plane = _PlaneDouble().install(monkeypatch)
-    fingerprint = _sent(monkeypatch, plane)
-    assert fingerprint['held'] == plane_service._held(plane.issue)
-    assert fingerprint['held'] != plane_service._sha('T', '<p>summary</p>')
-
-
-def test_a_resend_that_hits_409_vouches_for_nothing(monkeypatch):
-    """A 409 links an issue this call did not write. Someone may have edited it since, so
-    there is nothing to fingerprint -- and a later update must comment, not overwrite."""
-    _stub_plane(monkeypatch,
-                post=lambda *a, **kw: _FakeResponse(409, {'id': 'existing-issue'}),
-                get=lambda *a, **kw: _FakeResponse(200, {'id': 'existing-issue'}))
-    result = plane_service.send_article_to_plane(_ARTICLE, 'summary')
-    assert result['issue_id'] == 'existing-issue' and result['fingerprint'] is None
-
-
-def test_an_untouched_todo_is_refreshed_in_place(monkeypatch):
-    plane = _PlaneDouble().install(monkeypatch)
-    fingerprint = _sent(monkeypatch, plane)
-
-    result = plane_service.update_article_todo(_ARTICLE, 'a better summary', 'issue-1',
-                                               fingerprint=fingerprint)
-
-    assert result['outcome'] == 'refreshed', result
-    assert [w[0] for w in plane.writes] == ['PATCH']
-    assert 'a better summary' in plane.writes[0][2]['description_html']
-    # The new fingerprint is again what Plane stored, so a SECOND update still refreshes.
-    assert result['fingerprint']['held'] == plane_service._held(plane.issue)
-    again = plane_service.update_article_todo(_ARTICLE, 'better still', 'issue-1',
-                                              fingerprint=result['fingerprint'])
-    assert again['outcome'] == 'refreshed'
-
-
-def test_a_todo_edited_in_plane_gets_a_comment_and_keeps_the_edit(monkeypatch):
-    """The whole point. Chris's notes on the to-do must survive an update from the article."""
-    plane = _PlaneDouble().install(monkeypatch)
-    fingerprint = _sent(monkeypatch, plane)
-    plane.issue['description_html'] = '<div><p>summary</p><p>MY OWN NOTES</p></div>'
-
-    result = plane_service.update_article_todo(_ARTICLE, 'a better summary', 'issue-1',
-                                               fingerprint=fingerprint)
-
-    assert result['outcome'] == 'commented' and result['reason'] == 'edited', result
-    assert [(w[0], w[1].endswith('/comments/')) for w in plane.writes] == [('POST', True)]
-    assert 'a better summary' in plane.writes[0][2]['comment_html']
-    assert 'MY OWN NOTES' in plane.issue['description_html']
-    # `held` must NOT become the edited version, or the next update would overwrite it.
-    assert result['fingerprint']['held'] == fingerprint['held']
-    plane.writes.clear()
-    later = plane_service.update_article_todo(_ARTICLE, 'newer again', 'issue-1',
-                                              fingerprint=result['fingerprint'])
-    assert later['outcome'] == 'commented' and 'MY OWN NOTES' in plane.issue['description_html']
-
-
-def test_a_retitled_todo_counts_as_edited_too(monkeypatch):
-    plane = _PlaneDouble().install(monkeypatch)
-    fingerprint = _sent(monkeypatch, plane)
-    plane.issue['name'] = 'T -- renamed in Plane'
-    result = plane_service.update_article_todo(_ARTICLE, 'new', 'issue-1', fingerprint=fingerprint)
-    assert result['outcome'] == 'commented' and plane.issue['name'] == 'T -- renamed in Plane'
-
-
-def test_a_todo_with_no_fingerprint_is_never_overwritten(monkeypatch):
-    """Everything sent before this existed. Nobody can say whether it was edited."""
-    plane = _PlaneDouble().install(monkeypatch)
-    result = plane_service.update_article_todo(_ARTICLE, 'new', 'issue-1', fingerprint=None)
-    assert result['outcome'] == 'commented' and result['reason'] == 'untracked'
-    assert [w[0] for w in plane.writes] == ['POST']
-    assert 'cannot tell whether' in plane.writes[0][2]['comment_html']
-
-
-def test_an_unchanged_article_writes_nothing(monkeypatch):
-    """Clicking twice must not stack identical comments on the to-do."""
-    plane = _PlaneDouble().install(monkeypatch)
-    fingerprint = _sent(monkeypatch, plane)
-    result = plane_service.update_article_todo(_ARTICLE, 'summary', 'issue-1',
-                                               fingerprint=fingerprint)
-    assert result['outcome'] == 'unchanged' and plane.writes == []
-
-    commented = plane_service.update_article_todo(_ARTICLE, 'new', 'issue-1', fingerprint=None)
-    plane.writes.clear()
-    repeat = plane_service.update_article_todo(_ARTICLE, 'new', 'issue-1',
-                                               fingerprint=commented['fingerprint'])
-    assert repeat['outcome'] == 'unchanged' and plane.writes == []
-
-
-def test_update_reads_gone_and_unknown_the_way_issue_status_does(monkeypatch):
-    plane = _PlaneDouble().install(monkeypatch)
-    fingerprint = _sent(monkeypatch, plane)
-    plane.get_status = 404
-    assert plane_service.update_article_todo(_ARTICLE, 'new', 'issue-1',
-                                             fingerprint=fingerprint)['outcome'] == 'gone'
-    for code in (401, 500, 502):
-        plane.get_status = code
-        result = plane_service.update_article_todo(_ARTICLE, 'new', 'issue-1',
-                                                   fingerprint=fingerprint)
-        assert result['outcome'] == 'unknown' and result['fingerprint'] == fingerprint, code
-    assert plane.writes == []
-
-
-def test_a_failed_write_keeps_the_old_fingerprint(monkeypatch):
-    plane = _PlaneDouble().install(monkeypatch)
-    fingerprint = _sent(monkeypatch, plane)
-    monkeypatch.setattr(plane_service.requests, 'patch',
-                        lambda *a, **kw: _FakeResponse(500, {}))
-    result = plane_service.update_article_todo(_ARTICLE, 'new', 'issue-1', fingerprint=fingerprint)
-    assert result['outcome'] == 'failed' and result['fingerprint'] == fingerprint
-    assert '500' in result['error']
-
-
-def _recorded(state_file, aid):
-    return json.loads(state_file.read_text()).get('articles', {}).get(aid, {})
-
-
-async def _open_reader(user, aid):
-    await user.open('/intake-test')
-    await user.should_see('New Article')
-    user.find(marker=f'article-row-{aid}').click()
-    await user.should_see(marker=f'reader-update-todo-{aid}')
-
-
-@pytest.mark.nicegui_main_file('test_intake_fixes.py')
-async def test_updating_a_todo_records_the_new_fingerprint(user: User, isolated_intake,
-                                                           monkeypatch):
-    aid = '2026-07-30-235959-new-article.md'
-    state_file = isolated_intake['state_file']
-    _already_filed_state(state_file, aid)
-    calls = []
-
-    def _update(article, summary, issue_id, project_id=None, fingerprint=None):
-        calls.append((issue_id, fingerprint))
-        return {'outcome': 'refreshed', 'fingerprint': {'sent': 's2', 'held': 'h2'},
-                'error': None}
-
-    monkeypatch.setattr(plane_service, 'update_article_todo', _update)
-    await _open_reader(user, aid)
-    # The first version drew a rotate arrow right beside Resubmit's rotate arrow, and it
-    # was clicked for the wrong one. The two must not look alike.
-    with user.client:
-        update_icons = {i.props.get('name') for i in
-                        user.find(marker=f'reader-update-todo-{aid}').elements
-                        for i in i.descendants() if isinstance(i, ui.icon)}
-        resubmit_icons = {i.props.get('name') for i in
-                          user.find(marker=f'reader-resubmit-{aid}').elements
-                          for i in i.descendants() if isinstance(i, ui.icon)}
-    assert update_icons and resubmit_icons
-    assert not any('rotate' in n for n in update_icons), (update_icons, resubmit_icons)
-    user.find(marker=f'reader-update-todo-{aid}').click()
-
-    assert await _wait_until(lambda: _recorded(state_file, aid).get('plane_fingerprint')
-                             == {'sent': 's2', 'held': 'h2'}), state_file.read_text()
-    assert calls == [('already-filed-id', None)]
-    await user.should_see('To-do updated in HomeLab.')
-    assert _recorded(state_file, aid)['plane_issue_id'] == 'already-filed-id'
-
-
-@pytest.mark.nicegui_main_file('test_intake_fixes.py')
-async def test_updating_a_todo_deleted_in_plane_unlinks_it(user: User, isolated_intake,
-                                                           monkeypatch):
-    aid = '2026-07-30-235959-new-article.md'
-    state_file = isolated_intake['state_file']
-    _already_filed_state(state_file, aid)
-    monkeypatch.setattr(plane_service, 'update_article_todo',
-                        lambda *a, **kw: {'outcome': 'gone', 'fingerprint': None, 'error': None})
-    await _open_reader(user, aid)
-    user.find(marker=f'reader-update-todo-{aid}').click()
-
-    assert await _wait_until(lambda: _recorded(state_file, aid).get('plane_issue_id') is None)
-    await user.should_see(marker=f'reader-send-icon-{aid}')
-
-
-@pytest.mark.nicegui_main_file('test_intake_fixes.py')
-async def test_an_update_that_could_not_reach_plane_changes_nothing(user: User, isolated_intake,
-                                                                    monkeypatch):
-    aid = '2026-07-30-235959-new-article.md'
-    state_file = isolated_intake['state_file']
-    _already_filed_state(state_file, aid)
-    before = state_file.read_text()
-    monkeypatch.setattr(plane_service, 'update_article_todo',
-                        lambda *a, **kw: {'outcome': 'unknown', 'fingerprint': None,
-                                          'error': 'HomeLab did not answer.'})
-    await _open_reader(user, aid)
-    user.find(marker=f'reader-update-todo-{aid}').click()
-
-    await user.should_see('Could not reach HomeLab — nothing was changed.')
-    assert json.loads(state_file.read_text())['articles'][aid] == json.loads(before)['articles'][aid]
-    await user.should_see(marker=f'reader-update-todo-{aid}')

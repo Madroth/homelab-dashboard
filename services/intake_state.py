@@ -26,14 +26,8 @@ CONVERSATIONS_FILE = os.path.expanduser('~/projects/homelab-dashboard/intake_con
 # indistinguishable from deleted. Without this field, re-checking an article sent to a
 # non-default project would orphan a live to-do and mark the article unsent. None means
 # "sent before the picker existed", which resolves to the configured default.
-#
-# plane_fingerprint is what lets "Update to-do" refresh a to-do without ever overwriting
-# a hand edit made in Plane -- see plane.update_article_todo(). None means nobody can vouch
-# for the to-do's contents (sent before fingerprints, or linked via a 409 rather than
-# written), and an update then goes in as a comment.
 _DEFAULT_ARTICLE_STATE = {'read': False, 'favorite': False, 'archived': False,
-                          'plane_issue_id': None, 'plane_project_id': None,
-                          'plane_fingerprint': None}
+                          'plane_issue_id': None, 'plane_project_id': None}
 # Newest first is the default ordering -- Chris's call, 2026-09-11. The model's
 # priority_score is a sort the user picks, never the one they land on.
 DEFAULT_SORT = 'date'

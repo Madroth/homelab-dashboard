@@ -31,9 +31,9 @@ homelab-monitoring has live Prometheus/Alertmanager rules, but its registry list
 checks and nothing links the two yet (rechecked 2026-09-11).
 
 **Send to HomeLab** is done as a correctness effort (idempotent, create/verify reported
-separately, three-valued re-check), has a project picker (2026-09-09), and as of 2026-09-11
-can update a sent to-do. Updates follow *refresh, never clobber*, and a hand edit made in
-Plane is never overwritten. The update path has not yet been exercised against live Plane.
+separately, three-valued re-check) and has a project picker (2026-09-09). A sent to-do stays
+write-once by choice: an update path was built and removed on 2026-09-11 as not needed
+(see `TODO.md`).
 
 ## What to do next
 

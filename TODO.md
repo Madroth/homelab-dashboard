@@ -293,18 +293,20 @@
         'gone', and an issue in another project answers 404 from the default one —
         indistinguishable from deleted. Without recording the project, the first re-check
         of an article sent elsewhere would orphan a live to-do and mark it unsent.
-  - [x] **Done 2026-09-11.** A sent article's to-do was write-once. The reader now has an
-        "Update to-do" control, and Chris chose the behaviour: *refresh, never clobber*.
-        `plane.update_article_todo()` replaces the to-do's name and description only while
-        Plane still holds exactly what the dashboard last wrote; any edit made in Plane
-        turns the update into a comment, and state/labels/assignees are never touched. The
-        fingerprint is of what Plane *stores*, not what was sent. Plane rewrites
-        `description_html` on save (`<p>` comes back as `<div><p>`, checked read-only
-        against live Plane), so fingerprinting what we sent would read every to-do as edited.
-        To-dos sent before this change, or linked via a 409, carry no fingerprint and always
-        get a comment. The one linked article today (DockTail) is one of these. **Not yet
-        exercised against live Plane:** the PATCH and comment endpoints were confirmed to
-        exist (`OPTIONS`), but no write was made from this session.
+  - [x] **Closed 2026-09-11 as not needed — built, then removed the same day.** "A sent
+        article's to-do is write-once" was never a request. Traced back, it was a bare
+        bullet written 2026-08-22 (`e0ea2ff`) by a session tidying this file: a description
+        of a limitation, with no reason attached. It was then copied into STATUS.md,
+        homelab-intake's triage and the handoffs until it read as "the only unblocked feature
+        left". The 2026-08-18 investigation it supposedly came from never mentions it.
+        It was built (`14ae6d3`, *refresh, never clobber*, proven once against live Plane: one
+        comment on the DockTail to-do, nothing else changed). Then Chris asked when he would
+        ever need it. The only case is resubmitting an article *after* sending it, since
+        Resubmit rewrites title and summary in place. He removed it: "I can't imagine
+        needing it." Reverted with `67109d7`'s icon and click fix. If it ever comes back,
+        `14ae6d3` has the design, including the finding that Plane rewrites
+        `description_html` on save, so any "was it edited?" check must fingerprint what Plane
+        stores, not what was sent.
 
 - [ ] **media-curator coupling — a change over there landed today that reaches in here (2026-08-22)**
   `services/media.py` does `sys.path.append('/home/linuxbox/projects/media-curator')` and imports
@@ -475,12 +477,13 @@
   a deleted parent, which is really NiceGUI's bug to fix upstream. **Until then: check the
   service with a browser or the journal, not curl.**
 
-- [ ] **Older reader handlers share the race that bit Update to-do (found 2026-09-11).**
+- [ ] **Reader handlers can lose a click while the article is loading (found 2026-09-11).**
   `capture_client()` at the top of an *async* handler runs a tick after the click. If the
   reader re-renders in that tick (the article body arriving), the capture itself raises and
-  the click silently does nothing. `update_plane_todo` now takes the client from the click
-  event (`lambda e, i=aid: handler(i, e.client)`), which NiceGUI evaluates synchronously,
-  while the slot is still alive. `send_to_homelab`, `verify_plane_todo` and the toggles still
+  the click silently does nothing. A test caught exactly this on the since-removed Update
+  to-do control, and its fix was to take the client from the click event
+  (`lambda e, i=aid: handler(i, e.client)`), which NiceGUI evaluates synchronously while
+  the slot is still alive. `send_to_homelab`, `verify_plane_todo` and the toggles still
   capture late. Not observed failing, but the mechanism is the same. Converting them is
   mechanical.
 

@@ -519,13 +519,11 @@ def build():
             # the tab closes mid-request; only the in-memory patch/refresh needs a live client.
             await run.io_bound(intake_state.set_article_state, aid, read=True, archived=True,
                                 plane_issue_id=result['issue_id'],
-                                plane_project_id=result.get('project_id'),
-                                plane_fingerprint=result.get('fingerprint'))
+                                plane_project_id=result.get('project_id'))
             if client_alive(client):
                 _apply_workflow_change(aid, read=True, archived=True,
                                         plane_issue_id=result['issue_id'],
-                                        plane_project_id=result.get('project_id'),
-                                        plane_fingerprint=result.get('fingerprint'))
+                                        plane_project_id=result.get('project_id'))
                 render_articles.refresh()
                 render_folder_dropdown.refresh()
                 render_header.refresh()
@@ -587,9 +585,10 @@ def build():
         if status == 'gone':
             # Persist unconditionally, then patch in memory only if the tab is still
             # there -- mirrors send_to_homelab's split for the same reason.
-            await run.io_bound(intake_state.set_article_state, aid, **_UNLINKED)
+            await run.io_bound(intake_state.set_article_state, aid,
+                               plane_issue_id=None, plane_project_id=None)
             if client_alive(client):
-                _apply_workflow_change(aid, **_UNLINKED)
+                _apply_workflow_change(aid, plane_issue_id=None, plane_project_id=None)
         if not client_alive(client):
             return
         _refresh_send_control(aid)
@@ -603,80 +602,6 @@ def build():
             # the to-do is gone, so nothing was cleared -- say that rather than implying
             # the checkmark was checked and stands.
             notify_on(client, 'Could not reach HomeLab — checkmark left as it is.', type='info')
-
-    _UNLINKED = {'plane_issue_id': None, 'plane_project_id': None, 'plane_fingerprint': None}
-
-    async def update_plane_todo(aid, client=None):
-        """Brings a sent article's to-do up to date -- it used to be write-once.
-
-        Never overwrites a hand edit: plane.update_article_todo() replaces the name and
-        description only if Plane still holds exactly what the dashboard last wrote, and
-        otherwise posts the update as a comment. Chris's call, 2026-09-11.
-        """
-        if aid in state['verifying_ids'] or aid in state['sending_ids']:
-            return
-        wf = _wf(aid)
-        issue_id = wf.get('plane_issue_id')
-        art = next((a for a in state['articles'] if a['id'] == aid), None)
-        if not issue_id or not art:
-            return
-        # The click passes its client in. capture_client() here is too late: an async
-        # handler's body starts a tick after the click, and if the reader re-renders in
-        # that tick (its article body arriving, say) the slot is already gone and the
-        # capture itself raises -- the click silently does nothing. Caught by a test
-        # 2026-09-11. The fallback is for callers without an event.
-        client = client or capture_client()
-        state['verifying_ids'].add(aid)
-        _refresh_send_control(aid)
-        try:
-            data = await run.io_bound(intake.get_article, aid)
-            summary = ((data.get('summary') if data else '') or art.get('why_it_matters')
-                       or art.get('snippet') or '')
-            result = await run.io_bound(plane.update_article_todo, art, summary, issue_id,
-                                        wf.get('plane_project_id'), wf.get('plane_fingerprint'))
-        except Exception as e:  # noqa: BLE001 -- a stuck spinner is the failure to avoid
-            result = {'outcome': 'failed', 'fingerprint': wf.get('plane_fingerprint'),
-                      'error': f'{type(e).__name__}: {e}'}
-        finally:
-            state['verifying_ids'].discard(aid)
-        if result is None:   # io_bound cancelled: tab closed mid-call
-            if client_alive(client):
-                _refresh_send_control(aid)
-            return
-
-        outcome = result['outcome']
-        if outcome == 'gone':
-            changes = dict(_UNLINKED)
-        elif outcome in ('refreshed', 'commented'):
-            changes = {'plane_fingerprint': result['fingerprint']}
-        else:
-            changes = {}
-        if changes:
-            # Persist unconditionally, patch in memory only with a live tab -- the Plane
-            # write really happened, same split as send_to_homelab.
-            await run.io_bound(intake_state.set_article_state, aid, **changes)
-            if client_alive(client):
-                _apply_workflow_change(aid, **changes)
-        if not client_alive(client):
-            return
-        _refresh_send_control(aid)
-        messages = {
-            'refreshed': ('To-do updated in HomeLab.', 'positive'),
-            'commented': ('The to-do had been edited in HomeLab, so the update was added as '
-                          'a comment instead of replacing it.', 'info'),
-            'unchanged': ('Nothing new since the to-do was last written.', 'info'),
-            'gone': ('That to-do no longer exists in HomeLab — you can send again.', 'warning'),
-            'unknown': ('Could not reach HomeLab — nothing was changed.', 'info'),
-        }
-        text, kind = messages.get(outcome, (f"Could not update the to-do: {result['error']}",
-                                            'negative'))
-        if outcome == 'commented' and result.get('reason') == 'untracked':
-            text = ('Added the update as a comment — this to-do predates change tracking, so '
-                    'it was not safe to replace.')
-        if outcome == 'refreshed' and result.get('error'):
-            text, kind = ('To-do updated in HomeLab, but it could not be read back to '
-                          'confirm.', 'warning')
-        notify_on(client, text, type=kind)
 
     def _refresh_send_control(aid):
         """Repaints just the surfaces showing this article's send control. Nothing here
@@ -1978,20 +1903,6 @@ def build():
                             f'reader-sent-icon-{aid}').tooltip(
                             'Sent to HomeLab — click to re-check it still exists'):
                         ui.icon('fa-solid fa-check').style(f'font-size:12.5px;color:{theme.GREEN}')
-                    # Reader only: the list row has no room, and an update is a deliberate
-                    # act on the article you are reading, not a list-scanning one.
-                    # Pen-on-page in the sent tick's green, NOT a rotate arrow: the first
-                    # version used fa-rotate beside Resubmit's fa-rotate-right, and Chris
-                    # clicked Resubmit meaning this (2026-09-11). Green ties it to the ✓.
-                    with ui.element('div').classes('cursor-pointer').style(
-                            'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
-                            'justify-content:center'
-                    ).on('click', lambda e, i=aid: update_plane_todo(i, e.client)).mark(
-                            f'reader-update-todo-{aid}').tooltip(
-                            'Update the HomeLab to-do from this article — never overwrites edits '
-                            'made in HomeLab'):
-                        ui.icon('fa-solid fa-pen-to-square').style(
-                            f'font-size:12.5px;color:{theme.GREEN}')
                 else:
                     with ui.element('div').classes('cursor-pointer').style(
                             'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
