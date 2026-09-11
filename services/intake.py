@@ -433,7 +433,13 @@ def _mutate_tags(filename: str, mutate) -> bool:
     if meta is None:
         return False
 
-    meta['tags'] = mutate([str(t) for t in (meta.get('tags') or [])])
+    before = [str(t) for t in (meta.get('tags') or [])]
+    meta['tags'] = mutate(list(before))
+    # Marks the tags as Chris's. homelab-intake's reprocess keeps tags_edited tags instead of
+    # regenerating them, and its re-tag script never drops one (its CLAUDE.md constraint 2).
+    # Only a real change counts -- a normalisation no-op add is not an edit.
+    if meta['tags'] != before:
+        meta['tags_edited'] = True
     applied = {_normalise_tag(t) for t in meta['tags']}
     meta['suggested_tags'] = [
         str(t) for t in (meta.get('suggested_tags') or [])

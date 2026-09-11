@@ -768,6 +768,28 @@ def test_add_and_remove_tag_round_trip(tmp_path, monkeypatch):
     assert meta['tags'] == ['Tailscale']
 
 
+def test_a_hand_edit_marks_the_tags_as_the_users(tmp_path, monkeypatch):
+    """tags_edited is what tells homelab-intake's reprocess to keep these tags rather than
+    regenerate them (2026-09-11). Set by a real add or remove; a no-op add must not set it,
+    or merely opening the editor and retyping an existing tag would freeze the tags."""
+    monkeypatch.setattr(intake_service, 'ARTICLES_DIR', str(tmp_path))
+    _write_article(tmp_path, 'a.md', tags=['OpenSource'])
+
+    def edited():
+        meta, _ = intake_service._parse_frontmatter((tmp_path / 'a.md').read_text())
+        return bool(meta.get('tags_edited'))
+
+    intake_service.add_tag('a.md', 'open source')
+    assert not edited(), 'a normalisation no-op add marked the tags as hand-edited'
+    intake_service.add_tag('a.md', 'Tailscale')
+    assert edited()
+
+    _write_article(tmp_path, 'b.md', tags=['Docker', 'Helm'])
+    intake_service.remove_tag('b.md', 'Helm')
+    meta, _ = intake_service._parse_frontmatter((tmp_path / 'b.md').read_text())
+    assert meta.get('tags_edited') is True
+
+
 def test_add_tag_is_normalisation_aware(tmp_path, monkeypatch):
     """Adding 'open source' to an article already carrying 'OpenSource' must be a no-op --
     otherwise the manual editor reintroduces exactly the variant sprawl the vocabulary work
