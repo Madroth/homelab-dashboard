@@ -1176,7 +1176,7 @@ def build():
             current = next(iter(options))
         ui.select(options, value=current, on_change=_pick) \
             .props('dense outlined options-dense') \
-            .style('font-size:11px;min-width:150px;flex:none') \
+            .style('font-size:11px;min-width:150px;max-width:220px;flex:none') \
             .tooltip('Where Send to HomeLab files new to-dos') \
             .mark('plane-project-picker')
 
@@ -1205,7 +1205,6 @@ def build():
                 ui.label('Article Intake').style(
                     f'font-size:16px;font-weight:700;color:{theme.TEXT};flex:none;white-space:nowrap')
                 ui.space()
-                render_project_picker()
                 for icon, tip, handler in [
                     ('add_link', 'Add URL — not wired to a backend yet',
                      lambda: ui.notify('Add URL — not wired to a backend yet', type='info')),
@@ -1217,10 +1216,18 @@ def build():
                 ]:
                     ui.button(icon=icon, on_click=handler).props('flat dense round').style(
                         f'color:{theme.TEXT_MUTED};flex:none').tooltip(tip)
-            ui.label(
-                f"{live_n} article{'s' if live_n != 1 else ''} · {unread_n} unread · "
-                f"{archived_n} archived · queue {queue_n}"
-            ).style(f'font-size:11.5px;color:{theme.TEXT_DIM};width:100%')
+            # The project picker lives on this second line, which may wrap, not on the
+            # title row, which may not. On the title row it pushed the row to ~460px
+            # inside a 380px list column whenever the reader was open, spilling the
+            # buttons over the reader's Read/Discuss toggle (Chris, 2026-09-11).
+            with ui.row().classes('items-center').style(
+                    'width:100%;min-width:0;gap:4px 8px;flex-wrap:wrap'):
+                ui.label(
+                    f"{live_n} article{'s' if live_n != 1 else ''} · {unread_n} unread · "
+                    f"{archived_n} archived · queue {queue_n}"
+                ).style(f'font-size:11.5px;color:{theme.TEXT_DIM};min-width:0')
+                with ui.element('div').style('margin-left:auto;flex:none;max-width:100%'):
+                    render_project_picker()
 
     # ---------- rendering: toolbar dropdowns ----------
 
