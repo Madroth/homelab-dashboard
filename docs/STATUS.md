@@ -110,11 +110,13 @@ predecessor projects died:
 - **The WoW realm is running** (`gamelab list`: `wotlk` running, playable), so the
   "deliberately stopped" note in `TODO.md`'s game-server item describes 2026-09-01, not now.
   Load averages above 20 are ordinary again when it is up.
-- **homelab-monitoring's `GamelabTenantVanished` is firing critical and is false** (active
-  since 2026-09-11 02:04Z, unsilenced). Its textfile collector reads the tenant name from
-  column 2 of `gamelab list`, which became the new READY column on 2026-09-09, so it looks
-  for a tenant called `playable`. Theirs to fix. It is recorded here because it is exactly
-  the text-parsing trap the game-server panel has to avoid.
+- **homelab-monitoring's `GamelabTenantVanished` fired a false critical overnight**
+  (from 02:04Z, cleared by about 15:06Z on 2026-09-11). Its collector read the tenant name
+  from column 2 of `gamelab list`, which became the new READY column on 2026-09-09, so it
+  looked for a tenant called `playable`. They fixed it in `d924686` by importing gamelab's
+  Python directly instead. Both halves are what the game-server panel has to avoid: the
+  parsing trap, then the coupling. The ask for machine-readable output is gamelab
+  `docs/OPEN-WORK.md` item 11.
 
 ## Live lab state from 2026-08-30 (Omega still down 2026-09-11)
 

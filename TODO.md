@@ -38,10 +38,12 @@
       `Readiness(state, detail, elapsed)`, state `ready/waiting/failed/unknown/timeout`) but
       is not exposed. Parsing the table would break the first time a column moves. That
       already happened to homelab-monitoring's collector, which reads the tenant name from
-      column 2 and, since READY was added, reports a tenant called `playable`. Importing
-      gamelab's Python over `sys.path` is exactly the `services/media.py` coupling this
-      repo regrets. **Next: ask gamelab for `gamelab status --json` / `list --json` and
-      progress lines for `start`.** Then this is buildable.
+      column 2 and, once READY was added, fired a false critical for a tenant called
+      `playable`. They fixed it in `d924686` by importing gamelab's Python instead.
+      Importing gamelab over `sys.path` is exactly the `services/media.py` coupling this
+      repo regrets. **Asked 2026-09-11: gamelab `docs/OPEN-WORK.md` item 11** requests
+      `list --json` and `status <tenant> --json`. `start --no-wait` already exists, so the
+      dashboard can start a tenant and poll readiness. Buildable once item 11 lands.
     - **Original dependency note:** see gamelab `docs/OPEN-WORK.md` item 4b. The dashboard should call gamelab, not shell out to
       `docker` itself: starting a tenant has to go through `gamelab _up`, which is where
       the pending-neutralise safety check lives. A second start path that skips it would
