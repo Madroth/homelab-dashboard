@@ -2,9 +2,16 @@
 
 The retry patch below is the second time this suite has been bitten by a wall-clock
 budget, so it is fixed once at the harness rather than a third time per test.
-"""
-import os
 
+The failure recorder at the bottom exists because the media UI flake was chased for two
+sessions without a single failing run ever having its output saved.
+"""
+import datetime
+import os
+import re
+from pathlib import Path
+
+import pytest
 from nicegui.testing import User
 
 pytest_plugins = ['nicegui.testing.user_plugin']
@@ -57,3 +64,75 @@ async def _patient_should_not_see(self, target=None, *, kind=None, marker=None, 
 # impatient keeps that power.
 User.should_see = _patient_should_see
 User.should_not_see = _patient_should_not_see
+
+
+# ---------- a failing run records what it saw ----------
+#
+# test_media_fixes.py fails intermittently and the mechanism is still unknown, because no
+# failing run was ever kept: the batches that failed were read off a terminal and gone.
+# Every failure now leaves a file behind with the traceback, the captured logs, what the
+# simulated user was looking at, and how loaded the host was at that moment -- the one
+# thing a rerun on a quieter box can never tell you afterwards.
+#
+# Written for every phase, not just the call: NiceGUI's `user` fixture fails in TEARDOWN
+# when anything logged at ERROR during the test, so a failure that lives in a background
+# task shows up there and nowhere else.
+
+FAILURE_DIR = Path(os.environ.get('TEST_FAILURE_DIR', Path(__file__).parent / '.test-failures'))
+FAILURE_KEEP = 200   # newest files kept; a flake hunt of a few hundred runs fits
+
+
+def _read(path):
+    try:
+        return Path(path).read_text().strip()
+    except OSError as e:
+        return f'(unreadable: {e})'
+
+
+def _what_the_user_saw(item):
+    user = getattr(item, 'funcargs', {}).get('user')
+    if user is None:
+        return None
+    try:
+        notes = '\n'.join(f'  {m}' for m in user.notify.messages) or '  (none)'
+        return f'notifications:\n{notes}\n\nlayout:\n{user.current_layout}'
+    except Exception as e:  # noqa: BLE001 -- the client may already be torn down
+        return f'(could not read the page: {type(e).__name__}: {e})'
+
+
+def _record_failure(item, report):
+    stamp = datetime.datetime.now().strftime('%Y%m%dT%H%M%S.%f')
+    name = re.sub(r'[^\w.-]+', '_', item.nodeid)[-120:]
+    parts = [
+        f'test:     {item.nodeid}',
+        f'phase:    {report.when}',
+        f'at:       {datetime.datetime.now().isoformat(timespec="milliseconds")}',
+        f'duration: {report.duration:.3f}s',
+        f'retries:  {DEFAULT_RETRIES} (NICEGUI_TEST_RETRIES)',
+        f'nice:     {os.nice(0)}',
+        f'loadavg:  {_read("/proc/loadavg")}',
+        f'cpu psi:\n{_read("/proc/pressure/cpu")}',
+        f'io psi:\n{_read("/proc/pressure/io")}',
+    ]
+    saw = _what_the_user_saw(item)
+    if saw:
+        parts.append(f'\n===== what the user saw =====\n{saw}')
+    parts.append(f'\n===== failure =====\n{report.longreprtext}')
+    for title, content in report.sections:
+        parts.append(f'\n===== {title} =====\n{content}')
+
+    FAILURE_DIR.mkdir(exist_ok=True)
+    (FAILURE_DIR / f'{stamp}--{name}--{report.when}.txt').write_text('\n'.join(parts) + '\n')
+    for old in sorted(FAILURE_DIR.glob('*.txt'))[:-FAILURE_KEEP]:
+        old.unlink(missing_ok=True)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item, call):
+    report = yield
+    if report.failed:
+        try:
+            _record_failure(item, report)
+        except Exception as e:  # noqa: BLE001 -- recording must never change the verdict
+            print(f'conftest: could not record failure of {item.nodeid}: {e}')
+    return report
