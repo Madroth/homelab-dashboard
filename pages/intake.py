@@ -355,7 +355,7 @@ def build():
 
     def on_tag_search(e):
         state['tag_search'] = e.value or ''
-        render_tag_dropdown.refresh()
+        render_tag_list.refresh()
 
     def on_search(e):
         state['search'] = e.value or ''
@@ -1277,9 +1277,33 @@ def build():
                         ui.label('New folder').style(f'font-size:12px;color:{theme.ACCENT}')
 
     @ui.refreshable
-    def render_tag_dropdown():
+    def render_tag_list():
+        """The part of the tag menu that the filter box narrows. on_tag_search refreshes
+        only this: refreshing render_tag_dropdown instead recreated the ui.menu (which
+        starts closed) and the input being typed into, so the menu shut on every
+        keystroke -- reported by Chris 2026-09-11."""
         tag_row_elements.clear()
         tags = available_tags()
+        if not tags:
+            ui.label('No tags match.').style(f'font-size:11px;color:{theme.TEXT_DIM};padding:6px 2px')
+        with ui.column().classes('nq-custom-scroll').style('gap:1px;max-height:260px;overflow:auto'):
+            for tag, count in tags:
+                active = tag in state['tag_filters']
+                row = ui.row().classes('items-center no-wrap cursor-pointer').style(
+                        f'gap:8px;padding:5px 8px;border-radius:6px;'
+                        f'background:{theme.ACCENT_TINT if active else "transparent"}'
+                ).on('click', lambda _, t=tag: select_tag(t)).mark(f'tag-row-{tag}')
+                with row:
+                    ui.icon('fa-solid fa-check').style(
+                        f'font-size:9px;color:{theme.ACCENT if active else "transparent"};width:12px')
+                    label = ui.label(tag).style(
+                        f'flex:1;font-size:12px;color:{theme.ACCENT if active else theme.TEXT_MUTED};'
+                        f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap')
+                    ui.label(str(count)).style(f'font-size:10px;color:{theme.TEXT_DIM}')
+                tag_row_elements[tag] = (row, label)
+
+    @ui.refreshable
+    def render_tag_dropdown():
         n_selected = len(state['tag_filters'])
         with ui.row().classes('items-center no-wrap cursor-pointer').style(
                 f'gap:7px;height:32px;padding:0 11px;border-radius:8px;'
@@ -1289,7 +1313,7 @@ def build():
             ui.icon('fa-solid fa-tags').style(f'font-size:10px')
             ui.label(f'Tags{f" ({n_selected})" if n_selected else ""}')
             ui.icon('fa-solid fa-chevron-down').style('font-size:8px')
-            with ui.menu().props('persistent'):
+            with ui.menu().props('persistent').mark('tag-menu'):
                 with ui.column().style('gap:6px;padding:8px;min-width:220px'):
                     with ui.row().classes('items-center no-wrap').style(
                             'gap:6px;background:#242435;border:1px solid rgba(255,255,255,0.07);'
@@ -1297,27 +1321,11 @@ def build():
                         ui.icon('fa-solid fa-magnifying-glass').style(f'font-size:9px;color:{theme.TEXT_DIM}')
                         ui.input(placeholder='Filter tags…', value=state['tag_search'],
                                   on_change=on_tag_search).props('borderless dense').style(
-                            f'flex:1;color:{theme.TEXT};font-size:11px')
+                            f'flex:1;color:{theme.TEXT};font-size:11px').mark('tag-search')
                     if n_selected:
                         ui.label(f'clear {n_selected}').classes('cursor-pointer').style(
                             f'font-size:9.5px;font-weight:600;color:{theme.ACCENT}').on('click', lambda: clear_tags())
-                    if not tags:
-                        ui.label('No tags match.').style(f'font-size:11px;color:{theme.TEXT_DIM};padding:6px 2px')
-                    with ui.column().classes('nq-custom-scroll').style('gap:1px;max-height:260px;overflow:auto'):
-                        for tag, count in tags:
-                            active = tag in state['tag_filters']
-                            row = ui.row().classes('items-center no-wrap cursor-pointer').style(
-                                    f'gap:8px;padding:5px 8px;border-radius:6px;'
-                                    f'background:{theme.ACCENT_TINT if active else "transparent"}'
-                            ).on('click', lambda _, t=tag: select_tag(t))
-                            with row:
-                                ui.icon('fa-solid fa-check').style(
-                                    f'font-size:9px;color:{theme.ACCENT if active else "transparent"};width:12px')
-                                label = ui.label(tag).style(
-                                    f'flex:1;font-size:12px;color:{theme.ACCENT if active else theme.TEXT_MUTED};'
-                                    f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap')
-                                ui.label(str(count)).style(f'font-size:10px;color:{theme.TEXT_DIM}')
-                            tag_row_elements[tag] = (row, label)
+                    render_tag_list()
 
     @ui.refreshable
     def render_filter_chips():

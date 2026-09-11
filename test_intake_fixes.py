@@ -548,6 +548,33 @@ async def test_discuss_model_pick_is_per_article(user: User, isolated_intake):
 
 
 @pytest.mark.nicegui_main_file('test_intake_fixes.py')
+async def test_typing_in_the_tag_search_keeps_the_menu_open(user: User, isolated_intake):
+    """Reported by Chris 2026-09-11: every letter typed into the tag menu's filter box closed
+    the menu, so it had to be reopened to type the next one. on_tag_search refreshed the
+    whole render_tag_dropdown -- and a recreated ui.menu() starts closed, the same trap
+    select_tag() already sidesteps. Typing must rebuild only the list, never the menu or the
+    input being typed into."""
+    await user.open('/intake-test')
+    await user.should_see('New Article')
+    menu = next(iter(user.find(marker='tag-menu').elements))
+    search = next(iter(user.find(marker='tag-search').elements))
+    menu.open()
+
+    user.find(marker='tag-search').type('g')
+    await asyncio.sleep(0.2)
+    user.find(marker='tag-search').type('p')
+    await asyncio.sleep(0.2)
+
+    assert next(iter(user.find(marker='tag-menu').elements)) is menu, \
+        'typing rebuilt the tag menu, which closes it'
+    assert menu.value, 'the tag menu closed while typing'
+    assert next(iter(user.find(marker='tag-search').elements)) is search, \
+        'typing rebuilt the search box, which drops focus mid-word'
+    await user.should_see(marker='tag-row-gpu')
+    await user.should_not_see(marker='tag-row-docker')
+
+
+@pytest.mark.nicegui_main_file('test_intake_fixes.py')
 async def test_read_toggle_still_reorders_under_unread_sort(user: User, isolated_intake):
     """The single-row-refresh optimization for toggle_read/toggle_favorite/toggle_archived
     (added 2026-08-01 after a reported 1s+ delay on every toggle -- render_articles.refresh()
