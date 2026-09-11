@@ -125,7 +125,7 @@ def _clock(ts: float) -> str:
 
 def build():
     state = {'status': None, 'logs': [], 'errors': None, 'units': None,
-             'status_error': None, 'resources': None, 'query': '', 'reach': None, 'smart': None, 'backups': None, 'hosts': None}
+             'status_error': None, 'resources': None, 'query': '', 'reach': None, 'smart': None, 'backups': None, 'hosts': None, 'alerts': None}
 
     # ---------- shared chrome ----------
 
@@ -186,6 +186,7 @@ def build():
     # smartd polls on its own slow schedule, so this reader is cheap and rarely changes.
     stamp_smart = _stamp_for('smart', 900.0)
     stamp_backups = _stamp_for('backups', 900.0)
+    stamp_alerts = _stamp_for('alerts', 60.0)
 
     # F7. With 54 containers and 101 units, scrolling is not navigation.
     #
@@ -256,6 +257,15 @@ def build():
         errors = state['errors']
         failed = [e for e in (errors or {}).get('entries', []) if e['source'] == 'unit']
         unreadable = errors is not None and not errors['ok']
+        # Monitoring's own record of what it has deliberately exempted. A unit it has filed
+        # as known reads as known here too, not as broken -- Chris, 2026-09-11. Only when
+        # Alertmanager actually answered: an exemption nobody could verify does not apply,
+        # and the unit counts as broken, which is the fail-closed direction.
+        alerts = state['alerts']
+        alerts_ok = bool(alerts and alerts['ok'])
+        exempt = alerts['exempt_units'] if alerts_ok else {}
+        known = sorted({e['origin'] for e in failed if e['origin'] in exempt})
+        failed = [e for e in failed if e['origin'] not in exempt]
         # A service that cannot be reached is broken, and the banner has to say so. Left
         # out, the page would render "Nothing is broken" directly above a panel listing a
         # dead endpoint -- the same self-contradiction that made absorbing System Status
@@ -268,17 +278,38 @@ def build():
         # Deduped against failed units: plane-backup.service is already named there, and
         # saying it twice in one sentence reads as two problems.
         failed_units = {u['origin'] for u in failed}
-        bad_backups = [j['unit'] for j in (state['backups'] or {}).get('jobs', [])
-                       if not j['ok'] and not j['never_ran'] and j['unit'] not in failed_units]
+        backup_jobs = (state['backups'] or {}).get('jobs', [])
+        bad_backups = [j['unit'] for j in backup_jobs
+                       if not j['ok'] and not j['never_ran'] and j['unit'] not in failed_units
+                       and j['unit'] not in exempt]
+        known += sorted({j['unit'] for j in backup_jobs
+                         if not j['ok'] and not j['never_ran'] and j['unit'] in exempt}
+                        - set(known))
+        # Only an ACTIVE critical counts -- Chris, 2026-09-11. A suppressed one is monitoring
+        # holding a page back on purpose, and letting it turn this banner red would overrule
+        # a decision already made. One about a unit already named as failed says it twice.
+        firing = [a for a in (alerts['alerts'] if alerts_ok else [])
+                  if a['kind'] == 'paging' and a['severity'] == 'critical'
+                  and not (a['unit'] and a['unit'] in failed_units)]
+        other_entries = [e for e in (errors or {}).get('entries', [])
+                         if not (e['source'] == 'unit' and e['origin'] in exempt)]
+        known_note = (f" Known and exempted by monitoring: {', '.join(known[:3])}."
+                      if known else '')
+        alerts_note = (" homelab-monitoring's alerts could not be read, so its exemptions are "
+                       "not applied." if alerts is not None and not alerts_ok else '')
 
         if errors is None:
             tone, title, detail = theme.TEXT_MUTED, 'Reading…', 'Collecting errors, units and containers.'
         elif unreadable:
             tone, title = theme.TEXT_MUTED, 'Cannot tell'
             detail = f"A source did not answer — {errors['error']}. What is shown is incomplete."
-        elif failed or down or bad_disks or bad_backups:
+        elif failed or down or bad_disks or bad_backups or firing:
             tone, title = theme.RED, 'Something is broken'
             parts = []
+            if firing:
+                parts.append(f"{len(firing)} critical alert(s) firing: " + ', '.join(
+                    f"{a['name']} ({a['subject']})" if a['subject'] else a['name']
+                    for a in firing[:2]))
             if bad_backups:
                 parts.append('backup failed: ' + ', '.join(bad_backups[:2]))
             if bad_disks:
@@ -288,17 +319,25 @@ def build():
                 parts.append(f"{len(failed)} unit(s) in a failed state: {names}")
             if down:
                 parts.append('not reachable: ' + ', '.join(down[:3]))
-            detail = '. '.join(parts) + '.'
-        elif errors['entries']:
+            detail = '. '.join(parts) + '.' + known_note + alerts_note
+        elif other_entries:
             tone, title = theme.AMBER, 'Errors logged'
-            detail = f"{len(errors['entries'])} distinct error(s) in the last 24h. Nothing is in a failed state."
+            detail = (f"{len(other_entries)} distinct error(s) in the last 24h. Nothing "
+                      f"{'unexpected ' if known else ''}is in a failed state."
+                      + known_note + alerts_note)
         elif reach is None:
             tone, title = theme.TEXT_MUTED, 'Cannot tell'
             detail = 'Errors and units are clear, but reachability has not been read yet.'
+        elif known:
+            # Not "Nothing is broken": something IS failed. It is just a failure monitoring
+            # has filed as known, and the banner says which rather than going quiet about it.
+            tone, title = theme.GREEN, 'Nothing unexpected is broken'
+            detail = ('No failed units beyond the known ones, no other errors logged in the '
+                      'last 24h, and every endpoint answered.' + known_note + alerts_note)
         else:
             tone, title = theme.GREEN, 'Nothing is broken'
             detail = ('No failed units, no errors logged in the last 24h, and every '
-                      'endpoint answered.')
+                      'endpoint answered.' + alerts_note)
 
         dashed = tone == theme.TEXT_MUTED
         with ui.row().classes('items-center no-wrap').style(
@@ -630,6 +669,91 @@ def build():
         elif len(all_units) > len(shown):
             ui.label(f'{len(all_units) - len(shown)} more units not shown').style(
                 f'font-size:10.5px;color:{theme.TEXT_DIM};margin-top:8px')
+
+    # ---------- alerts from homelab-monitoring ----------
+    #
+    # What the detector has decided, beside what this page measures for itself -- Chris,
+    # 2026-09-11. The value is the disagreements: a false critical next to a healthy
+    # container reads as false in seconds, and a failure here with no alert is a coverage
+    # gap. Read-only; nothing here sends, silences or decides anything.
+
+    _ALERT_TONES = {'critical': theme.RED, 'degraded': theme.AMBER, 'notice': theme.ACCENT}
+
+    def _alert_row(alert: dict, muted: bool = False):
+        tone = theme.TEXT_MUTED if muted else _ALERT_TONES.get(alert['severity'], theme.TEXT_MUTED)
+        if alert['held_by']:
+            verdict = f"{alert['severity']} · held back ({alert['held_by']})"
+        elif alert['kind'] == 'accepted':
+            verdict = alert['severity']
+        else:
+            verdict = f"{alert['severity']} · firing"
+        row = ui.column().style(
+            f'gap:3px;padding:9px 14px;border-radius:9px;width:100%;background:{theme.CARD_BG};'
+            f'border:1px solid {tone if alert["kind"] == "paging" else theme.BORDER}'
+        ).mark(f"alert-{alert['name']}")
+        if alert['unit']:
+            # The dashboard's own evidence for the same unit: its state and log tail.
+            row.classes('cursor-pointer').on(
+                'click', lambda _, u=alert['unit'], m=alert['manager'] or 'user':
+                show_unit_detail(u, m)).tooltip('Open this unit\'s state and log')
+        with row:
+            with ui.row().classes('items-center no-wrap w-full').style('gap:10px'):
+                ui.element('div').style(
+                    f'width:7px;height:7px;border-radius:50%;background:{tone};flex:none')
+                ui.label(alert['name'] + (f" — {alert['subject']}" if alert['subject'] else '')) \
+                    .style(f'font-size:11.5px;font-weight:600;color:{theme.TEXT};flex:1;'
+                           f'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap')
+                ui.label(verdict).style(f'font-size:10.5px;font-weight:700;color:{tone};flex:none')
+            if alert['summary']:
+                ui.label(alert['summary']).style(f'font-size:11px;color:{theme.TEXT_MUTED}')
+            since = f"since {_ago(alert['since'])}" if alert['since'] else 'start time unknown'
+            ui.label(since + (f" · {alert['runbook']}" if alert['runbook'] else '')).style(
+                f"font-size:10px;color:{theme.TEXT_DIM};font-family:'JetBrains Mono',monospace;"
+                f"user-select:text;word-break:break-all")
+
+    @ui.refreshable
+    def render_alerts():
+        alerts = state['alerts']
+        if alerts is None:
+            ui.element('div').classes('nq-skel').style(
+                'height:50px;border-radius:9px;background:rgba(255,255,255,0.04);width:100%')
+            return
+        if not alerts['ok']:
+            _unknown_box(f"Could not read homelab-monitoring's alerts — {alerts['error']}. "
+                         f"This says nothing about what is or is not firing, and the units it "
+                         f"exempts are counted as broken above until it answers.")
+            return
+
+        firing = [a for a in alerts['alerts'] if a['kind'] in ('paging', 'notice')]
+        held = [a for a in alerts['alerts'] if a['kind'] in ('accepted', 'quiet')]
+        exemptions = [a for a in alerts['alerts'] if a['kind'] == 'exemption']
+        with ui.column().style('gap:6px;width:100%'):
+            if not any(a['kind'] == 'paging' for a in firing):
+                with ui.row().classes('items-center no-wrap').style('gap:10px;padding:2px 2px'):
+                    ui.element('div').style(
+                        f'width:7px;height:7px;border-radius:50%;background:{theme.GREEN};flex:none')
+                    ui.label('No critical or degraded alert is firing.').style(
+                        f'font-size:11.5px;color:{theme.TEXT_MUTED}').mark('alerts-none-firing')
+            for alert in firing:
+                _alert_row(alert)
+            if held:
+                ui.label('HELD BACK OR KNOWN').style(
+                    f'font-size:9.5px;font-weight:700;letter-spacing:0.08em;'
+                    f'color:{theme.TEXT_DIM};margin-top:6px')
+                for alert in held:
+                    _alert_row(alert, muted=True)
+            if exemptions:
+                label = f"{len(exemptions)} exemption{'s' if len(exemptions) != 1 else ''} in force"
+                with ui.expansion(label).props('dense').style(
+                        f'width:100%;font-size:11.5px;color:{theme.TEXT_MUTED}').mark('alert-exemptions'):
+                    for alert in exemptions:
+                        until = f" — until {alert['review_after']}" if alert['review_after'] else ''
+                        ui.label(f"{alert['subject'] or alert['rule_id'] or '?'}{until}").style(
+                            f"font-size:10.5px;color:{theme.TEXT_DIM};"
+                            f"font-family:'JetBrains Mono',monospace")
+            ui.label('Read from Alertmanager on this host. This page shows what monitoring '
+                     'decided; it sends, silences and decides nothing.').style(
+                f'font-size:10.5px;color:{theme.TEXT_DIM};margin-top:2px')
 
     # ---------- backups (F15) and remote hosts (F16) ----------
 
@@ -1425,6 +1549,16 @@ def build():
             render_verdict.refresh()
             stamp_backups.refresh()
 
+    async def refresh_alerts():
+        alerts = await run.io_bound(system.get_alerts)
+        if alerts is None:
+            return
+        if client_alive():
+            state['alerts'] = alerts
+            render_alerts.refresh()
+            render_verdict.refresh()
+            stamp_alerts.refresh()
+
     async def refresh_smart():
         smart = await run.io_bound(system.get_disk_health)
         if smart is None:
@@ -1475,6 +1609,7 @@ def build():
         await refresh_network()
         await refresh_smart()
         await refresh_backups()
+        await refresh_alerts()
 
     # ---------- AI context ----------
 
@@ -1494,6 +1629,17 @@ def build():
         lines += [f"- FAILED {e['origin']}" for e in failed]
         lines += [f"- {e['origin']}: {e['message'][:160]}" for e in errors.get('entries', [])[:10]
                   if e['source'] != 'unit']
+        alerts = state['alerts']
+        if alerts and alerts['ok']:
+            paging = [a for a in alerts['alerts'] if a['kind'] == 'paging']
+            lines.append(f"homelab-monitoring: {len(paging)} alert(s) firing at critical/degraded"
+                         + (': ' + ', '.join(f"{a['name']} ({a['subject']})" for a in paging[:5])
+                            if paging else '.'))
+            if alerts['exempt_units']:
+                lines.append('Exempted by monitoring (known, not counted as broken): '
+                             + ', '.join(sorted(alerts['exempt_units'])))
+        elif alerts is not None:
+            lines.append(f"homelab-monitoring's alerts could not be read: {alerts['error']}")
         if errors.get('error'):
             lines.append(f"Some sources unreadable: {errors['error']}")
         return '\n'.join(lines)
@@ -1552,7 +1698,10 @@ def build():
         render_filter_banner()
         render_verdict()
 
-        _section_label('ERRORS — LAST 24 HOURS', top='24px', stamp=stamp_errors)
+        _section_label('ALERTS — FROM HOMELAB-MONITORING', top='24px', stamp=stamp_alerts)
+        render_alerts()
+
+        _section_label('ERRORS — LAST 24 HOURS', stamp=stamp_errors)
         render_errors()
 
         _section_label('UNITS', stamp=stamp_units)
@@ -1590,6 +1739,7 @@ def build():
     ui.timer(0.2, refresh_network, once=True)
     ui.timer(0.3, refresh_smart, once=True)
     ui.timer(0.4, refresh_backups, once=True)
+    ui.timer(0.05, refresh_alerts, once=True)
     # immediate=False on every poll: the once-timers above are the initial read, and
     # NiceGUI fires a repeating timer at once by default -- so each reader ran twice,
     # concurrently, on every page open.
@@ -1600,12 +1750,13 @@ def build():
     ui.timer(60.0, refresh_network, immediate=False)
     ui.timer(600.0, refresh_smart, immediate=False)
     ui.timer(600.0, refresh_backups, immediate=False)
+    ui.timer(30.0, refresh_alerts, immediate=False)
 
     def tick_stamps():
         if not client_alive():
             return
         for stamp in (stamp_errors, stamp_units, stamp_containers, stamp_resources,
-                      stamp_network, stamp_smart, stamp_backups):
+                      stamp_network, stamp_smart, stamp_backups, stamp_alerts):
             stamp.refresh()
 
     ui.timer(5.0, tick_stamps)

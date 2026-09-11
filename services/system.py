@@ -954,6 +954,94 @@ def get_backups() -> dict:
             'error': '; '.join(problems) if problems else None}
 
 
+# Alerts from homelab-monitoring's Alertmanager -- Chris, 2026-09-11. What the detector has
+# decided, read so the page can show it beside what it measures for itself. Read-only: the
+# dashboard sends, silences and decides nothing (MONITORING.md -- a page you have to be
+# looking at is not a detector). Loopback only; Alertmanager is not exposed off this host.
+ALERTMANAGER_URL = 'http://127.0.0.1:9093'
+_ALERT_PAGING = ('critical', 'degraded')
+_ALERT_ORDER = {'paging': 0, 'notice': 1, 'accepted': 2, 'quiet': 3, 'exemption': 4}
+
+
+def _alert_stamp(raw: str | None) -> float | None:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat((raw or '').replace('Z', '+00:00')).timestamp()
+    except ValueError:
+        return None
+
+
+def get_alerts() -> dict:
+    """Every alert Alertmanager holds, sorted by what it means for the reader.
+
+    kind is one of:
+      'paging'     firing (or about to) at critical or degraded
+      'notice'     firing at notice
+      'accepted'   suppressed by monitoring itself (inhibited or silenced), or severity
+                   'known' -- firing, but a decision about it has already been made
+      'quiet'      anything else that is firing (severity 'silent')
+      'exemption'  a MonitoringExemption reminder. Its unit or container label is how the
+                   page knows what monitoring has deliberately stopped alerting on -- the
+                   same live source Alertmanager's own inhibit rules read.
+
+    Fail-closed: an Alertmanager that does not answer yields ok False with no alerts and
+    NO exemptions, never an empty list that reads as "nothing is firing".
+    """
+    import requests
+    now = time.time()
+    try:
+        resp = requests.get(f'{ALERTMANAGER_URL}/api/v2/alerts', timeout=5)
+        resp.raise_for_status()
+        raw = resp.json()
+        if not isinstance(raw, list):
+            raise ValueError(f'expected a list of alerts, got {type(raw).__name__}')
+    except Exception as e:
+        return {'ok': False, 'read_at': now, 'error': f'{type(e).__name__}: {e}',
+                'alerts': [], 'exempt_units': {}, 'exempt_names': {}}
+
+    alerts, exempt_units, exempt_names = [], {}, {}
+    for item in raw:
+        labels = item.get('labels') or {}
+        notes = item.get('annotations') or {}
+        status = item.get('status') or {}
+        name = labels.get('alertname') or '(unnamed)'
+        severity = labels.get('severity') or 'unknown'
+        state = status.get('state') or 'unknown'
+        held_by = ('silenced' if status.get('silencedBy') else
+                   'inhibited' if status.get('inhibitedBy') else None)
+        if name == 'MonitoringExemption':
+            kind = 'exemption'
+            claim = {'id': labels.get('id'), 'review_after': labels.get('review_after')}
+            if labels.get('unit'):
+                exempt_units[labels['unit']] = claim
+            elif labels.get('name'):
+                exempt_names[labels['name']] = claim
+        elif state == 'suppressed' or held_by or severity == 'known':
+            kind = 'accepted'
+        elif severity in _ALERT_PAGING:
+            kind = 'paging'
+        elif severity == 'notice':
+            kind = 'notice'
+        else:
+            kind = 'quiet'
+        alerts.append({
+            'name': name, 'severity': severity, 'state': state, 'kind': kind,
+            'held_by': held_by, 'since': _alert_stamp(item.get('startsAt')),
+            'unit': labels.get('unit'), 'manager': labels.get('manager'),
+            'subject': (labels.get('unit') or labels.get('name') or labels.get('tenant')
+                        or labels.get('source')),
+            'summary': notes.get('summary') or '', 'description': notes.get('description') or '',
+            'runbook': notes.get('runbook') or notes.get('runbook_url') or '',
+            'rule_id': labels.get('id'), 'review_after': labels.get('review_after'),
+        })
+
+    severity_rank = {'critical': 0, 'degraded': 1}
+    alerts.sort(key=lambda a: (_ALERT_ORDER[a['kind']], severity_rank.get(a['severity'], 2),
+                               a['name'], a['subject'] or ''))
+    return {'ok': True, 'read_at': now, 'error': None, 'alerts': alerts,
+            'exempt_units': exempt_units, 'exempt_names': exempt_names}
+
+
 # F16. Remote hosts. This box cannot enumerate them -- nothing here can prove what a
 # Windows workstation across the room is doing -- so everything below is a *claim* with a
 # date on it, read from ~/HomeLab/HARDWARE.md, which is the canonical inventory. Copying

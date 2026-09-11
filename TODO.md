@@ -487,6 +487,20 @@
   capture late. Not observed failing, but the mechanism is the same. Converting them is
   mechanical.
 
+- [ ] **Lab Health: an alerts panel read from homelab-monitoring's Alertmanager (Chris,
+  2026-09-11).** **Why:** two reasons, both shown by that day's events. (1) *Disagreements
+  become visible.* `GamelabTenantVanished` fired a false critical for 13 hours overnight while
+  Lab Health's own containers panel showed the tenant healthy. Side by side, it would have
+  read as false in seconds. The reverse case, something Lab Health sees broken that nothing
+  alerts on, is a coverage gap worth seeing too. (2) *One place to look*, without opening
+  Alertmanager or scrolling ntfy history. **Decided:** only an *active* critical counts
+  against the "Nothing is broken" banner; a suppressed one is shown, but it never keeps the
+  banner red over a deferral Chris already made. Units monitoring has exempted
+  (`MonitoringExemption` alerts, the same live source Alertmanager inhibits on) show as
+  "known", not broken. If Alertmanager cannot be read, exemptions do not apply and the panel
+  says so. Read-only: the dashboard still sends, silences and decides nothing. **Not P4**:
+  it shows what is firing, not coverage, which still waits on homelab-monitoring Block 3.1.
+
 ## Not this project (pruned 2026-08-29)
 
 Chris's call: this backlog tracks the dashboard only. Work on the services the dashboard

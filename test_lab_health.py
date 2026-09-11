@@ -189,8 +189,12 @@ _HEALTHY_HOSTS = {
 }
 
 
+_HEALTHY_ALERTS = {'ok': True, 'error': None, 'read_at': _NOW, 'alerts': [],
+                   'exempt_units': {}, 'exempt_names': {}}
+
+
 def _stub_page(monkeypatch, *, errors, units=None, status=None, resources=None, reach=None,
-               smart=None, backups=None, hosts=None):
+               smart=None, backups=None, hosts=None, alerts=None):
     monkeypatch.setattr(system_service, 'get_errors', lambda *a, **kw: errors)
     monkeypatch.setattr(system_service, 'get_units',
                         lambda *a, **kw: units or {'ok': True, 'units': [], 'error': None,
@@ -213,6 +217,9 @@ def _stub_page(monkeypatch, *, errors, units=None, status=None, resources=None, 
                         lambda *a, **kw: backups or _HEALTHY_BACKUPS)
     monkeypatch.setattr(system_service, 'get_remote_hosts',
                         lambda *a, **kw: hosts or _HEALTHY_HOSTS)
+    # Never the real Alertmanager: what is firing on this host must not decide a test.
+    monkeypatch.setattr(system_service, 'get_alerts',
+                        lambda *a, **kw: alerts or _HEALTHY_ALERTS)
     monkeypatch.setattr(system_service, 'get_uptime',
                         lambda *a, **kw: {'ok': True, 'error': None, 'seconds': 486000.0,
                                           'booted_at': _NOW - 486000.0})
@@ -1271,3 +1278,156 @@ async def test_a_stale_inventory_says_it_is_unverified(user: User, monkeypatch):
     _stub_page(monkeypatch, errors=_errors([]), hosts=hosts)
     await user.open('/lab-health-test')
     await user.should_see('past the 90-day review window')
+
+
+# ---------- alerts from homelab-monitoring (Chris, 2026-09-11) ----------
+#
+# Read-only display of what Alertmanager holds. Two rules decided with the panel: only an
+# ACTIVE critical counts against the banner, and a unit monitoring has exempted reads as
+# known -- but only while Alertmanager answers, so an unverifiable exemption never hides a
+# failure.
+
+class _AMResponse:
+    def __init__(self, payload, status=200):
+        self._payload, self.status_code = payload, status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f'HTTP {self.status_code}')
+
+    def json(self):
+        return self._payload
+
+
+def _am_alert(alertname, severity, *, state='active', inhibited=False, **labels):
+    # `alertname`, not `name`: container exemptions carry a `name` label of their own.
+    return {'labels': {'alertname': alertname, 'severity': severity, **labels},
+            'annotations': {'summary': f'{alertname} summary',
+                            'runbook': f'look at {alertname}'},
+            'status': {'state': state, 'inhibitedBy': ['x'] if inhibited else [],
+                       'silencedBy': [], 'mutedBy': []},
+            'startsAt': '2026-09-11T15:04:39.662Z'}
+
+
+def test_alerts_reader_fails_closed_when_alertmanager_does_not_answer(monkeypatch):
+    import requests
+
+    def boom(*a, **kw):
+        raise requests.ConnectionError('connection refused')
+
+    monkeypatch.setattr(requests, 'get', boom)
+    result = system_service.get_alerts()
+    assert result['ok'] is False and 'ConnectionError' in result['error']
+    # No exemptions either: an exemption nobody could read must not hide a failure.
+    assert result['alerts'] == [] and result['exempt_units'] == {}
+
+
+def test_alerts_reader_rejects_an_answer_that_is_not_a_list(monkeypatch):
+    import requests
+    monkeypatch.setattr(requests, 'get', lambda *a, **kw: _AMResponse({'status': 'error'}))
+    assert system_service.get_alerts()['ok'] is False
+
+
+def test_alerts_reader_sorts_firing_from_held_back_from_exemptions(monkeypatch):
+    """The shapes are the live ones from 2026-09-11: a suppressed critical about
+    plane-backup, a 'known' repo alert, and exemption reminders for a unit and a container."""
+    import requests
+    payload = [
+        _am_alert('MonitoringExemption', 'silent', unit='plane-backup.service',
+                  id='plane-backup', review_after='2026-10-01'),
+        _am_alert('MonitoringExemption', 'silent', name='freqtrade-dry1', id='freqtrade-dry1'),
+        _am_alert('SystemdUnitFailed', 'critical', state='suppressed', inhibited=True,
+                  unit='plane-backup.service', manager='user'),
+        _am_alert('repo-missing', 'known', source='plane-backup'),
+        _am_alert('RootFilling', 'degraded', source='node'),
+        _am_alert('HostDown', 'critical', source='node'),
+    ]
+    monkeypatch.setattr(requests, 'get', lambda *a, **kw: _AMResponse(payload))
+    result = system_service.get_alerts()
+    assert result['ok'] is True
+    kinds = [(a['name'], a['kind']) for a in result['alerts']]
+    assert kinds[:2] == [('HostDown', 'paging'), ('RootFilling', 'paging')]
+    assert ('SystemdUnitFailed', 'accepted') in kinds and ('repo-missing', 'accepted') in kinds
+    held = next(a for a in result['alerts'] if a['name'] == 'SystemdUnitFailed')
+    assert held['held_by'] == 'inhibited' and held['manager'] == 'user'
+    assert set(result['exempt_units']) == {'plane-backup.service'}
+    assert set(result['exempt_names']) == {'freqtrade-dry1'}
+    assert result['exempt_units']['plane-backup.service']['review_after'] == '2026-10-01'
+
+
+def _reader_alerts(*items):
+    """Build what get_alerts() returns, via the real classifier."""
+    return dict(_HEALTHY_ALERTS, alerts=list(items),
+                exempt_units={a['unit']: {'id': a['rule_id'], 'review_after': a['review_after']}
+                              for a in items if a['kind'] == 'exemption' and a['unit']})
+
+
+def _alert(name, severity, kind, *, unit=None, subject=None, held_by=None, review_after=None):
+    return {'name': name, 'severity': severity, 'state': 'active', 'kind': kind,
+            'held_by': held_by, 'since': _NOW - 600, 'unit': unit, 'manager': 'user',
+            'subject': subject or unit, 'summary': f'{name} summary', 'description': '',
+            'runbook': f'look at {name}', 'rule_id': name, 'review_after': review_after}
+
+
+_PLANE_BACKUP_FAILED = [
+    {'source': 'unit', 'origin': 'plane-backup.service', 'at': _NOW, 'count': 1,
+     'first_at': _NOW, 'severity': 'critical',
+     'message': 'plane-backup.service is in a failed state (failed)',
+     'detail': {'manager': 'user', 'unit': 'plane-backup.service'}}]
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_firing_critical_alert_reaches_the_verdict(user: User, monkeypatch):
+    _stub_page(monkeypatch, errors=_errors([]), alerts=_reader_alerts(
+        _alert('HostDown', 'critical', 'paging', subject='nas')))
+    await user.open('/lab-health-test')
+    await user.should_see('Something is broken')
+    await user.should_see('HostDown (nas)', kind=ui.label)
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_held_back_critical_does_not_turn_the_banner_red(user: User, monkeypatch):
+    """Monitoring suppressed it on purpose. Turning the banner red would overrule that."""
+    _stub_page(monkeypatch, errors=_errors([]), alerts=_reader_alerts(
+        _alert('SystemdUnitFailed', 'critical', 'accepted', unit='quant-lab.service',
+               held_by='inhibited')))
+    await user.open('/lab-health-test')
+    await user.should_see('Nothing is broken')
+    await user.should_see('critical · held back (inhibited)')
+    await user.should_see(marker='alerts-none-firing')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_failure_monitoring_has_exempted_reads_as_known(user: User, monkeypatch):
+    _stub_page(monkeypatch, errors=_errors(_PLANE_BACKUP_FAILED), alerts=_reader_alerts(
+        _alert('MonitoringExemption', 'silent', 'exemption', unit='plane-backup.service',
+               review_after='2026-10-01')))
+    await user.open('/lab-health-test')
+    await user.should_see('Nothing unexpected is broken')
+    await user.should_see('Known and exempted by monitoring: plane-backup.service', kind=ui.label)
+    await user.should_not_see('Something is broken')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_an_unreadable_alertmanager_applies_no_exemptions(user: User, monkeypatch):
+    """Fail closed: the exemption cannot be verified, so the failure counts."""
+    _stub_page(monkeypatch, errors=_errors(_PLANE_BACKUP_FAILED),
+               alerts={'ok': False, 'error': 'ConnectionError: refused', 'read_at': _NOW,
+                       'alerts': [], 'exempt_units': {}, 'exempt_names': {}})
+    await user.open('/lab-health-test')
+    await user.should_see('Something is broken')
+    await user.should_see("Could not read homelab-monitoring's alerts — ConnectionError: refused",
+                          kind=ui.label)
+    await user.should_not_see(marker='alerts-none-firing')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_exemption_reminders_collapse_into_one_line(user: User, monkeypatch):
+    _stub_page(monkeypatch, errors=_errors([]), alerts=_reader_alerts(
+        _alert('MonitoringExemption', 'silent', 'exemption', unit='livescore.service'),
+        _alert('MonitoringExemption', 'silent', 'exemption', unit='quant-lab.service')))
+    await user.open('/lab-health-test')
+    await user.should_see(marker='alert-exemptions')
+    with user.client:
+        expansion = next(iter(user.find(marker='alert-exemptions').elements))
+        assert expansion.props.get('label') == '2 exemptions in force'
