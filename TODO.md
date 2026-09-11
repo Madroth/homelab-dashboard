@@ -434,6 +434,31 @@
   NiceGUI's `User` harness timing out under contention is now a repeat pattern here rather than a
   one-off, and probably wants a fix at the harness level rather than per-test.
 
+- [ ] **A page fetched without a browser logs ~23 errors a minute later (found 2026-09-11).**
+  Any HTTP GET of a page that never opens the websocket (curl, a link preview, an HTTP
+  monitor) makes NiceGUI build the whole layout, all tabs, for a client that never
+  connects. Every one-shot and immediate timer on it waits for that connection. When NiceGUI
+  discards the client about 65 s later, the waits are released and each timer dies in
+  `_get_context()`: `RuntimeError: The parent slot of the element has been deleted`, one per
+  timer. Measured: one curl gave 23 errors at +65 s on today's code and 25 on `4e0a189`, run
+  side by side on a loopback port. **It predates 2026-09-11.** It was never seen before
+  because nothing fetched the dashboard without a browser, until the session's own
+  post-restart curls (138 errors at 11:02). Two more single bursts (11:06, 11:37) came from
+  a fetcher not identified. It breaks nothing, but these are ERROR lines in the journal, and
+  Lab Health's error stream reads the journal. Options: a light `/healthz` route for probes
+  and checks, so nothing needs to fetch a full page; and/or guard timer callbacks against
+  a deleted parent, which is really NiceGUI's bug to fix upstream. **Until then: check the
+  service with a browser or the journal, not curl.**
+
+- [ ] **Older reader handlers share the race that bit Update to-do (found 2026-09-11).**
+  `capture_client()` at the top of an *async* handler runs a tick after the click. If the
+  reader re-renders in that tick (the article body arriving), the capture itself raises and
+  the click silently does nothing. `update_plane_todo` now takes the client from the click
+  event (`lambda e, i=aid: handler(i, e.client)`), which NiceGUI evaluates synchronously,
+  while the slot is still alive. `send_to_homelab`, `verify_plane_todo` and the toggles still
+  capture late. Not observed failing, but the mechanism is the same. Converting them is
+  mechanical.
+
 ## Not this project (pruned 2026-08-29)
 
 Chris's call: this backlog tracks the dashboard only. Work on the services the dashboard

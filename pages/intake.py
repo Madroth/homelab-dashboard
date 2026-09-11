@@ -606,7 +606,7 @@ def build():
 
     _UNLINKED = {'plane_issue_id': None, 'plane_project_id': None, 'plane_fingerprint': None}
 
-    async def update_plane_todo(aid):
+    async def update_plane_todo(aid, client=None):
         """Brings a sent article's to-do up to date -- it used to be write-once.
 
         Never overwrites a hand edit: plane.update_article_todo() replaces the name and
@@ -620,9 +620,12 @@ def build():
         art = next((a for a in state['articles'] if a['id'] == aid), None)
         if not issue_id or not art:
             return
-        # Captured before the refresh below tears down this handler's own slot -- same
-        # mechanism as send_to_homelab, see capture_client()'s docstring.
-        client = capture_client()
+        # The click passes its client in. capture_client() here is too late: an async
+        # handler's body starts a tick after the click, and if the reader re-renders in
+        # that tick (its article body arriving, say) the slot is already gone and the
+        # capture itself raises -- the click silently does nothing. Caught by a test
+        # 2026-09-11. The fallback is for callers without an event.
+        client = client or capture_client()
         state['verifying_ids'].add(aid)
         _refresh_send_control(aid)
         try:
@@ -1970,14 +1973,18 @@ def build():
                         ui.icon('fa-solid fa-check').style(f'font-size:12.5px;color:{theme.GREEN}')
                     # Reader only: the list row has no room, and an update is a deliberate
                     # act on the article you are reading, not a list-scanning one.
+                    # Pen-on-page in the sent tick's green, NOT a rotate arrow: the first
+                    # version used fa-rotate beside Resubmit's fa-rotate-right, and Chris
+                    # clicked Resubmit meaning this (2026-09-11). Green ties it to the ✓.
                     with ui.element('div').classes('cursor-pointer').style(
                             'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'
                             'justify-content:center'
-                    ).on('click', lambda _, i=aid: update_plane_todo(i)).mark(
+                    ).on('click', lambda e, i=aid: update_plane_todo(i, e.client)).mark(
                             f'reader-update-todo-{aid}').tooltip(
-                            'Update the to-do from this article — never overwrites edits made in '
-                            'HomeLab'):
-                        ui.icon('fa-solid fa-rotate').style(f'font-size:12.5px;color:{theme.PURPLE}')
+                            'Update the HomeLab to-do from this article — never overwrites edits '
+                            'made in HomeLab'):
+                        ui.icon('fa-solid fa-pen-to-square').style(
+                            f'font-size:12.5px;color:{theme.GREEN}')
                 else:
                     with ui.element('div').classes('cursor-pointer').style(
                             'width:28px;height:28px;border-radius:6px;display:flex;align-items:center;'

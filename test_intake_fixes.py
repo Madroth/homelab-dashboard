@@ -1698,6 +1698,17 @@ async def test_updating_a_todo_records_the_new_fingerprint(user: User, isolated_
 
     monkeypatch.setattr(plane_service, 'update_article_todo', _update)
     await _open_reader(user, aid)
+    # The first version drew a rotate arrow right beside Resubmit's rotate arrow, and it
+    # was clicked for the wrong one. The two must not look alike.
+    with user.client:
+        update_icons = {i.props.get('name') for i in
+                        user.find(marker=f'reader-update-todo-{aid}').elements
+                        for i in i.descendants() if isinstance(i, ui.icon)}
+        resubmit_icons = {i.props.get('name') for i in
+                          user.find(marker=f'reader-resubmit-{aid}').elements
+                          for i in i.descendants() if isinstance(i, ui.icon)}
+    assert update_icons and resubmit_icons
+    assert not any('rotate' in n for n in update_icons), (update_icons, resubmit_icons)
     user.find(marker=f'reader-update-todo-{aid}').click()
 
     assert await _wait_until(lambda: _recorded(state_file, aid).get('plane_fingerprint')
