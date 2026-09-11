@@ -30,8 +30,19 @@
       gamelab reports rather than inventing its own check.
     - [ ] Show the cost of turning it on — slice memory in use against its ceiling —
       since the whole reason these are off is resource headroom.
-    - **Depends on gamelab exposing this properly first** — see gamelab
-      `docs/OPEN-WORK.md` item 4b. The dashboard should call gamelab, not shell out to
+    - **Status 2026-09-11: 4b is closed** (gamelab `0e91a38`, 2026-09-09). `start`,
+      `switch` and `restore` now wait for the tenant's `log_marker`, printing progress, and
+      `gamelab list` has a READY column. **What is still missing is machine-readable
+      output.** Everything gamelab offers is text for a human: no `--json`, no status file,
+      no API. The clean contract exists inside gamelab (`health.probe()` returns
+      `Readiness(state, detail, elapsed)`, state `ready/waiting/failed/unknown/timeout`) but
+      is not exposed. Parsing the table would break the first time a column moves. That
+      already happened to homelab-monitoring's collector, which reads the tenant name from
+      column 2 and, since READY was added, reports a tenant called `playable`. Importing
+      gamelab's Python over `sys.path` is exactly the `services/media.py` coupling this
+      repo regrets. **Next: ask gamelab for `gamelab status --json` / `list --json` and
+      progress lines for `start`.** Then this is buildable.
+    - **Original dependency note:** see gamelab `docs/OPEN-WORK.md` item 4b. The dashboard should call gamelab, not shell out to
       `docker` itself: starting a tenant has to go through `gamelab _up`, which is where
       the pending-neutralise safety check lives. A second start path that skips it would
       reintroduce a hazard that took real work to close.
@@ -173,8 +184,13 @@
         canonical doc is; everything is a dated claim except tailnet reachability, and
         QNAP2 renders as off-limits by policy rather than as a coverage gap.
   - [ ] P4 stays parked on registry-driven work — needs real check output from
-        `homelab-monitoring`. With M1 closed that project can now move, so this may
-        unblock sooner than earlier handoffs assumed.
+        `homelab-monitoring`. **Rechecked 2026-09-11, still parked.** That project now has
+        real runtime alerting: 8 Prometheus rules and 4 Loki rules, all evaluating, and
+        Alertmanager live on `:9093`. But `~/HomeLab/MONITORING-COVERAGE.json` still lists 0
+        of 18 checks as `live`, and nothing links a firing rule back to a registry subject
+        or check id. Their Block 3.1 (registry drives the rules) is what creates that link,
+        and it is unbuilt. Something buildable now, if wanted: an *active alerts* panel read
+        from Alertmanager's API. It is real and stable enough, but it is not P4.
   - [x] **Done 2026-09-09.** Per-container health rolls up to a service-level verdict.
         A container with no declared healthcheck reads "running, unchecked" — Chris's
         call — as a hollow outline rather than a filled box, and does not count as broken
@@ -250,7 +266,18 @@
         'gone', and an issue in another project answers 404 from the default one —
         indistinguishable from deleted. Without recording the project, the first re-check
         of an article sent elsewhere would orphan a live to-do and mark it unsent.
-  - [ ] A sent article's to-do is write-once; nothing updates it afterwards.
+  - [x] **Done 2026-09-11.** A sent article's to-do was write-once. The reader now has an
+        "Update to-do" control, and Chris chose the behaviour: *refresh, never clobber*.
+        `plane.update_article_todo()` replaces the to-do's name and description only while
+        Plane still holds exactly what the dashboard last wrote; any edit made in Plane
+        turns the update into a comment, and state/labels/assignees are never touched. The
+        fingerprint is of what Plane *stores*, not what was sent. Plane rewrites
+        `description_html` on save (`<p>` comes back as `<div><p>`, checked read-only
+        against live Plane), so fingerprinting what we sent would read every to-do as edited.
+        To-dos sent before this change, or linked via a 409, carry no fingerprint and always
+        get a comment. The one linked article today (DockTail) is one of these. **Not yet
+        exercised against live Plane:** the PATCH and comment endpoints were confirmed to
+        exist (`OPTIONS`), but no write was made from this session.
 
 - [ ] **media-curator coupling — a change over there landed today that reaches in here (2026-08-22)**
   `services/media.py` does `sys.path.append('/home/linuxbox/projects/media-curator')` and imports
@@ -341,8 +368,38 @@
   Doing nothing is also a position, but it should be a chosen one: the constraint currently
   says something the code does not do, which is how the next person gets misled.
 
-- [ ] **`test_media_fixes.py` fails intermittently under host load (found 2026-09-01).**
-  **Attempted 2026-09-09 and NOT fixed — read this before trying again.** The obvious
+- [x] **`test_media_fixes.py` fails intermittently under host load (found 2026-09-01).**
+  **Explained and fixed 2026-09-11. It was a real page bug, not a harness timing problem.**
+  The first step recommended below was taken: `conftest.py` now saves every failing run to
+  `.test-failures/`. The very first captures showed the confirm and edit dialogs had
+  *vanished* between the click and the next step. The mechanism: NiceGUI deletes a
+  `ui.dialog()` when an invisible canary element, placed wherever the dialog was created,
+  is collected. A dialog opened from a row click is created inside that row, and
+  `pages/media.py`'s 5 s poll rebuilt every row whether or not anything had changed. So any
+  poll landing while a dialog was open destroyed it, and the handler awaiting it hung. The
+  same rebuild deleted a button between `find()` and `click()`, which covers the two approve
+  tests. Under load a test straddles a poll more often, hence the load-dependence. On the
+  live page, Edit Title vanished within five seconds mid-typing. It was demonstrated
+  deterministically, 3 of 3 runs failing without any forced GC, before anything was changed.
+  Four fixes, each with a test that fails without it:
+  `components/page_dialog.py` anchors every dialog in the app to the page, and deletes it on
+  close so nothing leaks; the poll skips data that has not changed; the media handlers use
+  `capture_client()` (once the dialog survived, a bare `client_alive()` after the row rebuild
+  read "tab closed" and skipped the refresh, the same trap `components/util.py` documents for
+  intake); and repeating timers no longer fire at page open (`immediate=False`). NiceGUI's
+  default made Media, Home and Lab Health run every reader twice, concurrently, on each page
+  load. The media fixture also stubs `get_rejected` now. It had been reading the real
+  media-curator DB and stat'ing rejected files on the NAS in every UI test.
+  **Evidence under contention** (8 CPU burners at nice 10, tests at nice 19, load 11-24):
+  the original code (`4e0a189`) failed in **15 of 15** runs, 37 failures across 6 tests:
+  confirm dialog gone 18, edit dialog gone 7, double reload at open 8, poll rebuilt a row 2,
+  approve lost 2. The fixed code failed in **0 of 15** (360 test executions). Same harness,
+  same conditions, run back to back. This harness is harsher than ordinary load, which is
+  why the old code failed far more often here than the 1-in-15 seen on 2026-09-09.
+  The retry-budget raise in `conftest.py` stays as harmless, but it was never the mechanism,
+  as the 2026-09-09 note below suspected.
+
+  **Attempted 2026-09-09 and NOT fixed — the history, kept for the lesson.** The obvious
   hypothesis was NiceGUI's retry budget: `User.should_see` makes 3 attempts with a 0.1s
   sleep, so 0.3s for an async render to finish, which is a wall-clock assertion by another
   name. `conftest.py` now raises that default to 30 (override with `NICEGUI_TEST_RETRIES`),

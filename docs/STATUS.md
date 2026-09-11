@@ -1,48 +1,50 @@
 # Project status — resume point
 
-**Last updated:** 2026-08-29 · **HEAD:** `08b8ee3` plus this backlog prune · service
-`homelab-dashboard.service` **active** on :8085, running that code. Not yet pushed — pushing to
-`Madroth/homelab-dashboard` needs Chris's sign-off each time (ADR 7, Tier 2).
+**Last updated:** 2026-09-11 · service `homelab-dashboard.service` on :8085 · pushes to
+`Madroth/homelab-dashboard` need Chris's sign-off each time (ADR 7, Tier 2).
 
 Read this first when picking the project back up. `TODO.md` is the full backlog;
 `docs/LAB_HEALTH_FEATURES.md` is the prioritized plan for the monitoring page. This file is
-just "where things stand and what to do next".
+just "where things stand and what to do next". The session handoffs
+(`sessionctl resume --slug homelab-dashboard`) carry the per-session detail.
 
 ## Where things stand
 
-**Tests: 100 passing** (`./venv/bin/python -m pytest -q`, ~40s). Split: `test_intake_fixes.py`
-61, `test_lab_health.py` 27, `test_media_fixes.py` 12. No known flaky tests — the one that was
-(`test_toggle_select_timing_with_large_queue`) was rewritten to assert work done instead of
-wall-clock and now runs green repeatedly.
+**Tests: see the last commit message for the count** (`./venv/bin/python -m pytest -q`,
+~90 s). This file stopped carrying a number because it went stale for two weeks: it said 100
+while the suite was at 186. Every failing test now leaves a report in `.test-failures/`
+(gitignored) with the traceback, the logs, what the simulated user saw and the host's load.
+That is how the media flake was finally caught — see below.
 
-**Lab Health page — P0 through P3 complete.** P3 added SMART (F13), reachability (F14),
-backups (F15) and remote hosts (F16), plus the service-level health roll-up. Only P4 remains,
-and it waits on another project.
+**The media UI flake is explained and fixed (2026-09-11).** It was never the harness's retry
+budget. The page's 5 s poll rebuilt the whole queue whether or not anything had changed, and
+a rebuild deleted whatever dialog was open (NiceGUI ties a dialog's lifetime to a canary
+placed where the click happened) and whatever button was about to be clicked. On the live
+page that meant the Edit Title box vanished mid-typing. Fixes: `components/page_dialog.py`
+for every dialog in the app, a poll that skips unchanged data, `capture_client()` in the
+media handlers, and no double reload on page open (NiceGUI repeating timers fire at once by
+default, so Media, Home and Lab Health all ran their readers twice). Details are in
+`TODO.md`.
 
-**Earlier:** P1 gave every panel an "as of" stamp that
-ages into amber on its own timer, and one filter box across errors, units and containers
-that cannot make the lab look healthier than it is. P2 added a 60-sample in-process ring
-buffer (dropped on restart, never persisted, never alerted on) and the correlation window
-on an error detail. Both refuse to answer rather than guess when the readings are thin.
+**Lab Health page — P0 through P3 complete.** P4 (registry-driven) is still parked:
+homelab-monitoring has live Prometheus/Alertmanager rules, but its registry lists 0 live
+checks and nothing links the two yet (rechecked 2026-09-11).
 
-**Originally, P0:** The old System Status tab was absorbed into
-`pages/lab_health.py` (tab key is still `system`, so `?tab=system` links and the `ai_context`
-registration keep working). It has:
+**Send to HomeLab** is done as a correctness effort (idempotent, create/verify reported
+separately, three-valued re-check), has a project picker (2026-09-09), and as of 2026-09-11
+can update a sent to-do. Updates follow *refresh, never clobber*, and a hand edit made in
+Plane is never overwritten. The update path has not yet been exercised against live Plane.
 
-- an **error stream** merged from journald (`-p err`, both systemd managers), failed units, and
-  containers exited non-zero — collapsed by repeat, click for full copyable text plus the
-  command to dig further
-- a **units list** with state, restarts and a per-unit log tail
-- **containers** grouped by compose project, click for state, the container's own healthcheck
-  verdict, live `docker stats`, ports, mounts, output and a Dozzle link
-- **resources** — CPU, memory, disks, temperature, each clickable, with kernel pressure (PSI)
-  and swap exhaustion surfaced
-- links to Uptime Kuma `:3001`, Dozzle `:8888`, ntfy `:5001`
+## What to do next
 
-**Send to HomeLab is done as a correctness effort.** Idempotent via Plane's `external_id`,
-create/verify reported separately, the checkmark re-checkable against Plane, and nothing can
-escape the handler and strand a spinner. Only feature gaps remain (no project picker; a sent
-to-do is write-once).
+1. **Game Server control panel** — gamelab's 4b is closed, so this is now blocked only on
+   gamelab exposing machine-readable status (`--json` or equivalent). Ask gamelab for it;
+   don't parse its tables, and don't import it over `sys.path`.
+2. **P4** — waits on homelab-monitoring's Block 3.1. An Alertmanager-backed *active
+   alerts* panel is buildable today if Chris wants one sooner.
+3. **Local model host** — Omega's Ollama is down and the AI sidebar runs on the local
+   CPU-only instance as a stopgap. See `TODO.md` "Local model host". Restarting Omega is
+   Chris's.
 
 ## The one contract to preserve
 
@@ -52,21 +54,6 @@ not stylistic. The page it replaced reported the root SSD's free space as the NA
 because an unreadable source rendered as a plausible number. **Any new reader follows this, and
 you design the "cannot tell" face before the healthy one.** Same reasoning behind
 `plane.issue_status()` being three-valued rather than a bool.
-
-## What to do next
-
-1. **P4** — everything registry-driven, still parked on `homelab-monitoring` producing real
-   check output. With M1 closed that project can move, so this may unblock sooner than earlier
-   handoffs assumed. Design is in `docs/MONITORING_BRIEF.md` and the canvas; do not redo it.
-2. **Omega is still down** (8+ days). The AI sidebar runs against the local CPU-only Ollama,
-   which is slow — see `TODO.md` "Local model host". Restarting Ollama on Omega is Chris's. `test_media_fixes.py` covers undo
-   and the failure-surfacing paths; those two are the remaining gaps.
-3. ~~**Give `services/media.py` a defined boundary**~~ — done, `services/media_backend.py`.
-   *Original note:* — it imports media-curator's internals over
-   `sys.path.append` with no package boundary and no version pin, which is what made this week's
-   `undo()` data-integrity bug possible. The dashboard-side fix — name the surface this app needs
-   and depend on that, so a refactor over there fails loudly — is doable from this repo alone.
-   Whether media-curator publishes a real package is *their* Epic 7 and is not tracked here.
 
 ## Who builds here
 
@@ -118,7 +105,18 @@ predecessor projects died:
 - This repo is **not** the one `github-plane-sync` watches (that is `Madroth/Homelab`), and
   `TODO.md` is not published anywhere. The dashboard's own Plane writes are articles, not tasks.
 
-## Live lab state worth knowing (2026-08-30)
+## Live lab state worth knowing (2026-09-11)
+
+- **The WoW realm is running** (`gamelab list`: `wotlk` running, playable), so the
+  "deliberately stopped" note in `TODO.md`'s game-server item describes 2026-09-01, not now.
+  Load averages above 20 are ordinary again when it is up.
+- **homelab-monitoring's `GamelabTenantVanished` is firing critical and is false** (active
+  since 2026-09-11 02:04Z, unsilenced). Its textfile collector reads the tenant name from
+  column 2 of `gamelab list`, which became the new READY column on 2026-09-09, so it looks
+  for a tenant called `playable`. Theirs to fix. It is recorded here because it is exactly
+  the text-parsing trap the game-server panel has to avoid.
+
+## Live lab state from 2026-08-30 (Omega still down 2026-09-11)
 
 - **Omega's Ollama is not answering on `100.74.2.92:11434`** — found by F14 the moment it was
   built, and confirmed by hand: `tailscale ping Omega` returns instantly, so the host is up
