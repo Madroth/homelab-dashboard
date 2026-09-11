@@ -166,7 +166,7 @@ def build():
         'articles': [], 'queue': [], 'workflow': {}, 'folders': [],
         # homelab-intake's controlled vocabulary, backing the tag editor's search box.
         'tag_vocabulary': [],
-        'prefs': {'density': 'cozy', 'sort': 'unread'},
+        'prefs': {'density': 'cozy', 'sort': intake_state.DEFAULT_SORT},
         'folder': 'all', 'tag_filters': set(), 'tag_search': '', 'search': '',
         'select_mode': False, 'selected_ids': set(),
         'selected': None, 'article_content': None, 'reader_mode': 'read',
@@ -291,7 +291,7 @@ def build():
         return tags
 
     def _sorted_articles(arts):
-        sort = state['prefs'].get('sort', 'unread')
+        sort = state['prefs'].get('sort', intake_state.DEFAULT_SORT)
         if sort == 'date':
             return sorted(arts, key=_date_sort_key, reverse=True)
         if sort == 'priority':

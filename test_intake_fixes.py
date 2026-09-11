@@ -114,6 +114,18 @@ def test_prefs_shape_migrates_from_view_to_density(tmp_path, monkeypatch):
     assert intake_state.get_prefs()['density'] == 'compact'
 
 
+def test_default_sort_is_newest_first_never_priority(tmp_path, monkeypatch):
+    """Chris's call, 2026-09-11: the list lands newest first. The model's priority_score is a
+    sort he picks, never the one he lands on. Covers both ways a missing preference arises --
+    no state file at all, and a prefs dict without a 'sort' key."""
+    state_file = tmp_path / 'intake_state.json'
+    monkeypatch.setattr(intake_state, 'STATE_FILE', str(state_file))
+    assert intake_state.get_prefs()['sort'] == 'date'
+
+    state_file.write_text(json.dumps({'articles': {}, 'folders': [], 'prefs': {'density': 'cozy'}}))
+    assert intake_state.get_prefs()['sort'] == 'date'
+
+
 def test_conversation_shape_migrates_from_bare_list(tmp_path, monkeypatch):
     """intake_conversations.json used to be {article_id: [messages]}; it's now
     {article_id: {"messages": [...], "sources": {...}}}. Old-shape entries must be
@@ -541,8 +553,11 @@ async def test_read_toggle_still_reorders_under_unread_sort(user: User, isolated
     (added 2026-08-01 after a reported 1s+ delay on every toggle -- render_articles.refresh()
     was rebuilding all visible rows for a change affecting exactly one, see
     _refresh_after_workflow_change()) must still fall back to a full render_articles.refresh()
-    when the toggle changes visible order, not just when it changes membership. Default sort
-    is 'Unread first', so marking an article read must not leave the list in a broken state."""
+    when the toggle changes visible order, not just when it changes membership. Under
+    'Unread first', marking an article read must not leave the list in a broken state. That
+    sort is set explicitly: it stopped being the default on 2026-09-11."""
+    isolated_intake['state_file'].write_text(json.dumps(
+        {'articles': {}, 'folders': [], 'prefs': {'density': 'cozy', 'sort': 'unread'}}))
     await user.open('/intake-test')
     await user.should_see('New Article')
     aid = '2026-07-30-235959-new-article.md'
@@ -1230,17 +1245,17 @@ def _build_index(db_path, articles_dir, filename, *, title, date_processed,
     conn.execute("""CREATE TABLE articles (
         file_path TEXT, title TEXT, date_processed TEXT, source_url TEXT, dup_of TEXT,
         auto_generated INTEGER, tags TEXT, suggested_tags TEXT, content_type TEXT,
-        educational INTEGER, priority_score REAL, why_it_matters TEXT, status TEXT,
+        educational INTEGER, priority_score REAL, why_it_matters TEXT,
         user_folders TEXT, body TEXT, raw_content TEXT)""")
     path = os.path.join(str(articles_dir), filename)
     # The real indexer stores the article's whole body, headings and all -- the snippet
     # regex looks for '## Summary'. A stripped-down body here would fabricate a mismatch.
     if body is None:
         body = f'## Summary\n\nTest summary for {title}.\n'
-    conn.execute('INSERT INTO articles VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', (
+    conn.execute('INSERT INTO articles VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', (
         path, title, date_processed, f'https://example.com/{filename}', None, 0,
         json.dumps(tags or []), json.dumps([]), None, 1 if educational else 0,
-        priority_score, None, None, json.dumps([]), body,
+        priority_score, None, json.dumps([]), body,
         (articles_dir / filename).read_text(encoding='utf-8')))
     conn.commit()
     conn.close()

@@ -87,7 +87,6 @@ def _article_from_frontmatter(filename, content, meta, body):
         'educational': bool(meta.get('educational')),
         'priority_score': meta.get('priority_score'),
         'why_it_matters': meta.get('why_it_matters'),
-        'status': meta.get('status') or 'Inbox',
         'user_folders': [str(f) for f in (meta.get('user_folders') or [])],
         'reading_minutes': _reading_minutes(body),
     }
@@ -116,7 +115,6 @@ def _article_from_legacy(filename, content):
         'educational': False,  # legacy articles predate the field entirely
         'priority_score': None,
         'why_it_matters': None,
-        'status': 'Inbox',
         'user_folders': [],
         'reading_minutes': _reading_minutes(content),
     }
@@ -134,9 +132,11 @@ def _articles_dir_signature() -> tuple:
     return tuple(sorted((f, os.path.getmtime(f)) for f in files))
 
 
+# No `status`: homelab-intake retired it on 2026-09-11. Reading state (read/favorite/
+# archived) is this repo's, in intake_state.json -- the index never carried it.
 INDEX_COLUMNS = (
     'file_path, title, date_processed, source_url, dup_of, auto_generated, tags, '
-    'suggested_tags, content_type, educational, priority_score, why_it_matters, status, '
+    'suggested_tags, content_type, educational, priority_score, why_it_matters, '
     'user_folders, body, raw_content'
 )
 
@@ -155,7 +155,7 @@ def _article_from_row(row) -> dict:
     The two must stay in step: this is the fast path and that one is the fallback for
     articles the index does not carry, and a page cannot tell which produced a given item."""
     (file_path, title, date_processed, source_url, dup_of, auto_generated, tags,
-     suggested_tags, content_type, educational, priority_score, why_it_matters, status,
+     suggested_tags, content_type, educational, priority_score, why_it_matters,
      user_folders, body, raw_content) = row
     filename = os.path.basename(file_path)
     body = body or ''
@@ -180,7 +180,6 @@ def _article_from_row(row) -> dict:
         'educational': bool(educational),
         'priority_score': priority_score,
         'why_it_matters': why_it_matters,
-        'status': status or 'Inbox',
         'user_folders': [str(f) for f in json.loads(user_folders or '[]')],
         'reading_minutes': _reading_minutes(body),
     }
@@ -189,7 +188,7 @@ def _article_from_row(row) -> dict:
 def _sync_index_row(filepath: str) -> None:
     """Push a frontmatter edit into the index row for that file.
 
-    The dashboard rewrites frontmatter directly (status, tags, folders, dup_of) and the
+    The dashboard rewrites frontmatter directly (tags, folders, dup_of) and the
     files stay canonical either way. But list_articles() now READS the index, so without
     this the list would keep serving the pre-edit row until the daemon happened to reindex
     -- the click would appear to do nothing. docs/DESIGN.md §7 already calls for exactly
@@ -212,7 +211,7 @@ def _sync_index_row(filepath: str) -> None:
         try:
             conn.execute(
                 """UPDATE articles SET title=?, content_type=?, tags=?, suggested_tags=?,
-                       educational=?, why_it_matters=?, status=?, dup_of=?, user_folders=?,
+                       educational=?, why_it_matters=?, dup_of=?, user_folders=?,
                        body=?, raw_content=?
                    WHERE file_path=?""",
                 (meta.get('title'), meta.get('content_type'),
@@ -220,7 +219,6 @@ def _sync_index_row(filepath: str) -> None:
                  json.dumps(meta.get('suggested_tags') or []),
                  1 if meta.get('educational') else 0,
                  meta.get('why_it_matters'),
-                 meta.get('status') or 'Inbox',
                  meta.get('dup_of'),
                  json.dumps(meta.get('user_folders') or []),
                  body, content.lower(), filepath),

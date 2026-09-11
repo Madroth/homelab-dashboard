@@ -34,7 +34,10 @@ CONVERSATIONS_FILE = os.path.expanduser('~/projects/homelab-dashboard/intake_con
 _DEFAULT_ARTICLE_STATE = {'read': False, 'favorite': False, 'archived': False,
                           'plane_issue_id': None, 'plane_project_id': None,
                           'plane_fingerprint': None}
-_DEFAULT_STATE = {'articles': {}, 'folders': [], 'prefs': {'density': 'cozy', 'sort': 'unread'}}
+# Newest first is the default ordering -- Chris's call, 2026-09-11. The model's
+# priority_score is a sort the user picks, never the one they land on.
+DEFAULT_SORT = 'date'
+_DEFAULT_STATE = {'articles': {}, 'folders': [], 'prefs': {'density': 'cozy', 'sort': DEFAULT_SORT}}
 _DEFAULT_SOURCES = {'archive': True, 'repos': []}
 DEFAULT_MODEL = 'claude'  # per-article picks (see get_model/set_model) override this
 
@@ -87,7 +90,7 @@ def _normalize_prefs(prefs: dict) -> dict:
     if 'density' not in prefs:
         old_view = prefs.pop('view', None)
         prefs['density'] = 'compact' if old_view == 'table' else 'cozy'
-    prefs.setdefault('sort', 'unread')
+    prefs.setdefault('sort', DEFAULT_SORT)
     return prefs
 
 
