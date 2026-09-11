@@ -329,3 +329,44 @@ recovering the existing issue instead of duplicating it, and an unexpected error
 back as a result rather than raising. A separate,
 throwaway full-app boot check (all 6 tabs, real data, not part of the committed suite)
 confirmed the nav-sidebar restructure didn't regress the other 5 pages.
+
+---
+
+## 9. Product decisions carried over from homelab-intake (moved 2026-09-11)
+
+homelab-intake's `docs/DESIGN.md §8` used to specify this surface. On 2026-09-11 Chris ruled
+that intake sticks to the pipeline, so the surface's spec and decisions live here now. Intake
+keeps only the contract it owes this page: the index carries every field a list needs, and
+user-written frontmatter survives reindex and reprocess.
+
+**Landing view: the full list, newest first (Chris, 2026-09-11).** Intake's original spec
+called for a queue-first "Read Next" landing (top ~12 by `priority_score`). Withdrawn. Chris
+wants the whole list on arrival, **newest first by default**, with the sort his to change and
+tags as the way to narrow it. `priority_score` is a sort he picks — **never the default**.
+`intake_state.DEFAULT_SORT = 'date'` enforces it, and a test pins it (`43f42e2`).
+
+**Reading state is this repo's.** Read / favorite / archived are independent flags in
+`intake_state.json`, keyed by article filename. Intake retired its frontmatter `status` enum
+(`Inbox|Queued|Read|Archived`) the same day, because nothing ever moved it past `Inbox` and
+this page had always used its own flags; the index no longer has the column. Consequence:
+these marks are not rebuildable from `articles/` — `intake_state.json` is backed up by
+`~/projects/data-security` (`intake-backup.timer`).
+
+**Tags edited here are Chris's.** `_mutate_tags()` sets `tags_edited: true` on a real change
+(`d1d7ef5`). Intake then keeps those tags across a Resubmit instead of regenerating them, and
+its re-tag script never drops one. Folders (`user_folders`) survive a Resubmit the same way.
+
+**Views**
+- **List** *(landing)* — full corpus minus archived/duplicates, newest first, user-sortable,
+  tag-filterable (an article must carry every selected tag).
+- **Archive** — the "file away, compare later" bucket.
+
+**Card (list row)** — everything needed to triage without opening: title · `why_it_matters` ·
+content_type badge · read-time · priority badge · a marker when `tier2_present`. Actions:
+read/unread · favorite · archive · move to folder.
+
+**Detail view** — full summary, the Tier-2 application analysis if present, source link, metadata.
+
+**How new surfaces get built (intake's former convention, now this repo's):** Design-first — a
+Claude Design prototype against mock rows shaped like real frontmatter defines the surface
+before it is wired to the index; load the `frontend-design` skill.

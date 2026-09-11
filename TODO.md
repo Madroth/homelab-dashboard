@@ -51,6 +51,31 @@
     - Note only one game tenant may run at a time (`slots.capacity: 1`), so the UI is a
       *switch* between servers more than independent on/off toggles.
 
+- [ ] **Article Intake — backlog moved from homelab-intake (2026-09-11).** Intake's
+  Milestone C (its `BUILD_BACKLOG.md` Phases 8–10) was always work on this page; Chris ruled
+  that intake sticks to the pipeline, so it lives here now. Product decisions that came with it:
+  `docs/INTAKE_ARCHITECTURE.md §9`.
+  - [x] **Phase 8 — list, card, detail view.** Done 2026-09-11. "Read Next" as the landing
+        view was dropped: the list lands newest first (`43f42e2`), priority is a sort option.
+  - [ ] **Phase 9 — smart folders.** A saved query (tag filters + sort, maybe content_type)
+        that auto-populates. *Done when:* a saved smart folder picks up a newly processed
+        matching article with no manual step. The index already carries every field it would
+        filter on; nothing is needed from intake. Faceted browse and the Archive view exist.
+  - [ ] **Phase 10 — digest view.** An auto-generated "your week in saves" view. *Done when:*
+        it renders the week's articles. (The chat half of Phase 10 largely exists as
+        `components/discuss_panel.py` with citations — check it against "answers from the
+        corpus with clickable citations" before building anything.) A pushed digest
+        *notification* would be intake's (its `DESIGN.md §10`), not this page's.
+  - [ ] **"Analyze this" button** — forces Tier-2 analysis on a filed article. The button is
+        this page's; the force path is intake's Phase 11, so it waits on that.
+  - [ ] **Human review of the tag editor and Education view.** Tag editor reviewed by Chris
+        2026-09-11 ("looks good"); the tag-search box closing on every keystroke he found
+        there is fixed (`25331e5`). Education view not confirmed.
+  - [x] History carried over from intake's TODO, both done 2026-07-08: the Resubmit button,
+        and card-clutter trimming (AI-preamble stripping, the `###` truncation fix, 3-tag cap).
+  - Note: the **Tag Filtering** item below predates the tag menu (`render_tag_dropdown`,
+    multi-tag AND filter, searchable list), which now exists. Probably closable.
+
 - [ ] **Article Intake (Tag Filtering)** — ⏸ ON HOLD (Chris, 2026-08-02; revisit later)
   - [ ] Add a dedicated tag-filter UI to the article intake tab — tags currently only match via the free-text search bar, no way to browse/filter by tag directly.
   - [ ] Decide on presentation (filter chips, tag cloud, etc.) alongside the existing Homelab/News/Errors folder sidebar.
