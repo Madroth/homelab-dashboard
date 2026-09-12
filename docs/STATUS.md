@@ -26,6 +26,13 @@ media handlers, and no double reload on page open (NiceGUI repeating timers fire
 default, so Media, Home and Lab Health all ran their readers twice). Details are in
 `TODO.md`.
 
+**Lab Health shows homelab-monitoring's alerts (2026-09-11)**, beside what the page measures
+itself: firing, held back or known, and exemptions, read-only from Alertmanager on loopback.
+Only an *active* critical counts against the banner, and a failure monitoring has exempted
+reads "Nothing unexpected is broken" and names it. If Alertmanager is unreadable, exemptions
+stop applying. Its first live catch: a degraded alert for `job-hunter-console.service` that
+was a requested stop, not a crash (noted in homelab-monitoring's backlog).
+
 **Lab Health page — P0 through P3 complete.** P4 (registry-driven) is still parked:
 homelab-monitoring has live Prometheus/Alertmanager rules, but its registry lists 0 live
 checks and nothing links the two yet (rechecked 2026-09-11).
