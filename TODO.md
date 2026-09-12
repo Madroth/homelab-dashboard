@@ -475,7 +475,11 @@
   Lab Health's error stream reads the journal. Options: a light `/healthz` route for probes
   and checks, so nothing needs to fetch a full page; and/or guard timer callbacks against
   a deleted parent, which is really NiceGUI's bug to fix upstream. **Until then: check the
-  service with a browser or the journal, not curl.**
+  service with a browser or the journal, not curl.** *Reasoning confirmed by AntiGravity's
+  review, 2026-09-11.* It named the upstream fix: `Client.connected()` should check whether
+  the client was deleted after it wakes, because `Client.delete()` sets `_connected` and
+  releases the waiting timers as if the tab had connected. `/healthz` stays the right fix
+  for this app's own probes.
 
 - [ ] **Reader handlers can lose a click while the article is loading (found 2026-09-11).**
   `capture_client()` at the top of an *async* handler runs a tick after the click. If the
@@ -485,7 +489,8 @@
   (`lambda e, i=aid: handler(i, e.client)`), which NiceGUI evaluates synchronously while
   the slot is still alive. `send_to_homelab`, `verify_plane_todo` and the toggles still
   capture late. Not observed failing, but the mechanism is the same. Converting them is
-  mechanical.
+  mechanical. *Confirmed by AntiGravity's review, 2026-09-11*, which adds that the same
+  form works through `on_click=` (`on_click=lambda e, i=aid: handler(i, e.client)`).
 
 - [ ] **Lab Health: an alerts panel read from homelab-monitoring's Alertmanager (Chris,
   2026-09-11).** **Why:** two reasons, both shown by that day's events. (1) *Disagreements
