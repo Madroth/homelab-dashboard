@@ -1333,9 +1333,11 @@ def test_alerts_reader_sorts_firing_from_held_back_from_exemptions(monkeypatch):
     plane-backup, a 'known' repo alert, and exemption reminders for a unit and a container."""
     import requests
     payload = [
+        # Far-future dates: a real one would start failing this test the day it passed.
         _am_alert('MonitoringExemption', 'silent', unit='plane-backup.service',
-                  id='plane-backup', review_after='2026-10-01'),
-        _am_alert('MonitoringExemption', 'silent', name='freqtrade-dry1', id='freqtrade-dry1'),
+                  id='plane-backup', review_after='2999-10-01'),
+        _am_alert('MonitoringExemption', 'silent', name='freqtrade-dry1', id='freqtrade-dry1',
+                  review_after='2999-11-15'),
         _am_alert('SystemdUnitFailed', 'critical', state='suppressed', inhibited=True,
                   unit='plane-backup.service', manager='user'),
         _am_alert('repo-missing', 'known', source='plane-backup'),
@@ -1352,18 +1354,21 @@ def test_alerts_reader_sorts_firing_from_held_back_from_exemptions(monkeypatch):
     assert held['held_by'] == 'inhibited' and held['manager'] == 'user'
     assert set(result['exempt_units']) == {'plane-backup.service'}
     assert set(result['exempt_names']) == {'freqtrade-dry1'}
-    assert result['exempt_units']['plane-backup.service']['review_after'] == '2026-10-01'
+    assert result['exempt_units']['plane-backup.service']['review_after'] == '2999-10-01'
 
 
 def _reader_alerts(*items):
     """Build what get_alerts() returns, via the real classifier."""
     return dict(_HEALTHY_ALERTS, alerts=list(items),
                 exempt_units={a['unit']: {'id': a['rule_id'], 'review_after': a['review_after']}
-                              for a in items if a['kind'] == 'exemption' and a['unit']})
+                              for a in items if a['kind'] == 'exemption' and a['unit']},
+                exempt_names={a['subject']: {'id': a['rule_id'], 'review_after': a['review_after']}
+                              for a in items if a['kind'] == 'exemption' and not a['unit']})
 
 
-def _alert(name, severity, kind, *, unit=None, subject=None, held_by=None, review_after=None):
-    return {'name': name, 'severity': severity, 'state': 'active', 'kind': kind,
+def _alert(name, severity, kind, *, unit=None, subject=None, held_by=None, review_after=None,
+           state='active'):
+    return {'name': name, 'severity': severity, 'state': state, 'kind': kind,
             'held_by': held_by, 'since': _NOW - 600, 'unit': unit, 'manager': 'user',
             'subject': subject or unit, 'summary': f'{name} summary', 'description': '',
             'runbook': f'look at {name}', 'rule_id': name, 'review_after': review_after}
@@ -1431,3 +1436,60 @@ async def test_exemption_reminders_collapse_into_one_line(user: User, monkeypatc
     with user.client:
         expansion = next(iter(user.find(marker='alert-exemptions').elements))
         assert expansion.props.get('label') == '2 exemptions in force'
+
+
+# ---------- AntiGravity's review of the alerts panel, 2026-09-11 ----------
+
+def test_an_expired_or_undated_exemption_is_shown_but_not_applied(monkeypatch):
+    import requests
+    payload = [
+        _am_alert('MonitoringExemption', 'silent', unit='old.service', id='old',
+                  review_after='2000-01-01'),
+        _am_alert('MonitoringExemption', 'silent', unit='undated.service', id='undated'),
+        _am_alert('MonitoringExemption', 'silent', unit='current.service', id='current',
+                  review_after='2999-01-01'),
+    ]
+    monkeypatch.setattr(requests, 'get', lambda *a, **kw: _AMResponse(payload))
+    result = system_service.get_alerts()
+    assert set(result['exempt_units']) == {'current.service'}
+    expired = {a['subject']: a['expired'] for a in result['alerts']}
+    assert expired == {'old.service': True, 'undated.service': True, 'current.service': False}
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_an_unprocessed_critical_does_not_count_yet(user: User, monkeypatch):
+    """Chris's rule is ACTIVE critical only. 'unprocessed' has not been run past the
+    silences and inhibitions yet, and may turn out suppressed a moment later."""
+    _stub_page(monkeypatch, errors=_errors([]), alerts=_reader_alerts(
+        _alert('HostDown', 'critical', 'paging', subject='nas', state='unprocessed')))
+    await user.open('/lab-health-test')
+    await user.should_see('Nothing is broken')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_an_exempted_container_reads_as_known_not_as_logged_errors(user: User,
+                                                                        monkeypatch):
+    _stub_page(monkeypatch, errors=_errors([
+        {'source': 'container', 'origin': 'freqtrade-dry1', 'at': 0.0, 'count': 1,
+         'first_at': 0.0, 'severity': 'error',
+         'message': 'container freqtrade-dry1 exited with code 137',
+         'detail': {'container': 'freqtrade-dry1'}}]),
+        alerts=_reader_alerts(_alert('MonitoringExemption', 'silent', 'exemption',
+                                     subject='freqtrade-dry1', review_after='2999-01-01')))
+    await user.open('/lab-health-test')
+    await user.should_see('Nothing unexpected is broken')
+    await user.should_not_see('Errors logged')
+
+
+@pytest.mark.nicegui_main_file('test_lab_health.py')
+async def test_a_failed_backup_and_its_alert_are_named_once(user: User, monkeypatch):
+    backups = dict(_HEALTHY_BACKUPS, jobs=[
+        {'unit': 'x-backup.service', 'manager': 'user', 'description': 'X Backup',
+         'ok': False, 'never_ran': False, 'result': 'exit-code', 'exit_status': '1',
+         'odd_exit': False, 'last_run': _NOW, 'next_run': None, 'last_words': None,
+         'log_error': None}])
+    _stub_page(monkeypatch, errors=_errors([]), backups=backups, alerts=_reader_alerts(
+        _alert('SystemdUnitFailedLogged', 'critical', 'paging', unit='x-backup.service')))
+    await user.open('/lab-health-test')
+    await user.should_see('backup failed: x-backup.service')
+    await user.should_not_see('critical alert(s) firing')

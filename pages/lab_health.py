@@ -264,7 +264,14 @@ def build():
         alerts = state['alerts']
         alerts_ok = bool(alerts and alerts['ok'])
         exempt = alerts['exempt_units'] if alerts_ok else {}
-        known = sorted({e['origin'] for e in failed if e['origin'] in exempt})
+        exempt_names = alerts['exempt_names'] if alerts_ok else {}
+        entries = (errors or {}).get('entries', [])
+
+        def _exempted(e):
+            return ((e['source'] == 'unit' and e['origin'] in exempt)
+                    or (e['source'] == 'container' and e['origin'] in exempt_names))
+
+        known = sorted({e['origin'] for e in entries if _exempted(e)})
         failed = [e for e in failed if e['origin'] not in exempt]
         # A service that cannot be reached is broken, and the banner has to say so. Left
         # out, the page would render "Nothing is broken" directly above a panel listing a
@@ -288,11 +295,14 @@ def build():
         # Only an ACTIVE critical counts -- Chris, 2026-09-11. A suppressed one is monitoring
         # holding a page back on purpose, and letting it turn this banner red would overrule
         # a decision already made. One about a unit already named as failed says it twice.
+        # state 'active', not merely unsuppressed: 'unprocessed' is an alert Alertmanager
+        # has not yet run past its silences and inhibitions (AntiGravity's review).
+        named = failed_units | set(bad_backups)
         firing = [a for a in (alerts['alerts'] if alerts_ok else [])
                   if a['kind'] == 'paging' and a['severity'] == 'critical'
-                  and not (a['unit'] and a['unit'] in failed_units)]
-        other_entries = [e for e in (errors or {}).get('entries', [])
-                         if not (e['source'] == 'unit' and e['origin'] in exempt)]
+                  and a['state'] == 'active'
+                  and not (a['unit'] and a['unit'] in named)]
+        other_entries = [e for e in entries if not _exempted(e)]
         known_note = (f" Known and exempted by monitoring: {', '.join(known[:3])}."
                       if known else '')
         alerts_note = (" homelab-monitoring's alerts could not be read, so its exemptions are "
@@ -748,6 +758,8 @@ def build():
                         f'width:100%;font-size:11.5px;color:{theme.TEXT_MUTED}').mark('alert-exemptions'):
                     for alert in exemptions:
                         until = f" — until {alert['review_after']}" if alert['review_after'] else ''
+                        if alert.get('expired'):
+                            until += ' (expired, not applied)'
                         ui.label(f"{alert['subject'] or alert['rule_id'] or '?'}{until}").style(
                             f"font-size:10.5px;color:{theme.TEXT_DIM};"
                             f"font-family:'JetBrains Mono',monospace")

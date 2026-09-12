@@ -13,7 +13,14 @@ _REGISTRY: dict[str, dict[str, Callable[[], None]]] = {}  # client_id -> {key: r
 
 
 def register(key: str, refresh: Callable[[], None]) -> None:
-    cid = context.client.id
+    client = context.client
+    cid = client.id
+    if cid not in _REGISTRY:
+        # Forget the tab when NiceGUI discards it. Nothing did, so every page view left its
+        # refresh closures -- and through them its whole element tree -- here until the
+        # service restarted (AntiGravity's review, 2026-09-11). No-argument closure on
+        # purpose: NiceGUI passes the client to a handler that takes a parameter.
+        client.on_delete(lambda: _REGISTRY.pop(cid, None))
     _REGISTRY.setdefault(cid, {})[key] = refresh
 
 

@@ -11,7 +11,11 @@ _REGISTRY: dict[str, dict] = {}  # client_id -> {'active_tab': str, 'getters': {
 
 
 def _entry() -> dict:
-    cid = context.client.id
+    client = context.client
+    cid = client.id
+    if cid not in _REGISTRY:
+        # Same leak, same fix as components/live_state.py: forget the tab when it is deleted.
+        client.on_delete(lambda: _REGISTRY.pop(cid, None))
     return _REGISTRY.setdefault(cid, {'active_tab': None, 'getters': {}, 'card_getters': {}})
 
 

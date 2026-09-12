@@ -34,7 +34,10 @@ def fake_media_service(monkeypatch):
     queue = [_item(str(i)) for i in range(3)]
 
     def _get_queue(*a, **kw):
-        return list(queue)
+        # Fresh dicts every call, as sqlite rows are. Handing back the same objects let a
+        # test's edit to the fake mutate the page's stored copy too, so "has anything
+        # changed?" compared an object with itself and could never say yes.
+        return [dict(it) for it in queue]
 
     def _approve(item_id):
         for it in queue:
@@ -255,6 +258,22 @@ async def test_a_poll_that_finds_nothing_new_rebuilds_nothing(user: User, fake_m
 
 
 @pytest.mark.nicegui_main_file('test_media_fixes.py')
+async def test_a_change_elsewhere_in_the_queue_still_renders(user: User, fake_media_service):
+    """AntiGravity's review, 2026-09-11. The single-row fast path refreshes only the row you
+    acted on but stores the whole refetched queue -- so a change the daemon made to ANOTHER
+    item was recorded as already shown, and the poll, seeing nothing new, never drew it."""
+    await user.open('/media-test')
+    await user.should_see('Title 1')
+    await asyncio.sleep(0.5)
+
+    fake_media_service[1]['proposed_title'] = 'Renamed By The Daemon'   # a background change
+    user.find(marker='approve-0').click()
+    await user.should_see('Auto-sorted: Title 0')
+
+    await user.should_see('Renamed By The Daemon', retries=70)   # through at least one poll
+
+
+@pytest.mark.nicegui_main_file('test_media_fixes.py')
 async def test_a_closed_dialog_is_deleted_not_just_hidden(user: User, fake_media_service):
     """Anchoring dialogs to the page means nothing else will ever clean them up, so
     page_dialog() must -- or every detail dialog opened in a long-lived Lab Health tab
@@ -272,6 +291,27 @@ async def test_a_closed_dialog_is_deleted_not_just_hidden(user: User, fake_media
 
     with user.client:
         assert len(list(user.current_layout.descendants())) == before
+
+
+@ui.page('/blank')
+def _blank_page():
+    ui.label('Nothing here')
+
+
+@pytest.mark.nicegui_main_file('test_media_fixes.py')
+async def test_a_closed_tab_leaves_nothing_in_the_per_tab_registries(user: User,
+                                                                     fake_media_service):
+    """AntiGravity's review, 2026-09-11: live_state and ai_context keyed their entries by
+    client id and never removed them, so every page view stayed in memory for good."""
+    from components import ai_context, live_state
+    await user.open('/media-test')
+    await user.should_see('Title 0')
+    tab = user.client
+    assert tab.id in live_state._REGISTRY and tab.id in ai_context._REGISTRY
+    await user.open('/blank')
+    tab.delete()   # what NiceGUI does to a tab that closed and did not come back
+    assert tab.id not in live_state._REGISTRY
+    assert tab.id not in ai_context._REGISTRY
 
 
 def test_no_page_creates_a_dialog_the_poll_can_delete():

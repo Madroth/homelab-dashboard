@@ -988,6 +988,7 @@ def get_alerts() -> dict:
     NO exemptions, never an empty list that reads as "nothing is firing".
     """
     import requests
+    from datetime import date
     now = time.time()
     try:
         resp = requests.get(f'{ALERTMANAGER_URL}/api/v2/alerts', timeout=5)
@@ -1009,12 +1010,23 @@ def get_alerts() -> dict:
         state = status.get('state') or 'unknown'
         held_by = ('silenced' if status.get('silencedBy') else
                    'inhibited' if status.get('inhibitedBy') else None)
+        expired = False
         if name == 'MonitoringExemption':
             kind = 'exemption'
             claim = {'id': labels.get('id'), 'review_after': labels.get('review_after')}
-            if labels.get('unit'):
+            # homelab-monitoring stops publishing an entry once review_after passes, so an
+            # expired one should never arrive. Checked here too, in the fail-closed direction:
+            # an exemption past its date -- or with a date nobody can read -- is shown, but
+            # not applied. If the two sides ever disagree, the page shows the failure while
+            # the phone stays quiet, which is the disagreement this panel exists to surface
+            # (AntiGravity's review, 2026-09-11).
+            try:
+                expired = date.fromisoformat(labels.get('review_after') or '') < date.today()
+            except ValueError:
+                expired = True
+            if not expired and labels.get('unit'):
                 exempt_units[labels['unit']] = claim
-            elif labels.get('name'):
+            elif not expired and labels.get('name'):
                 exempt_names[labels['name']] = claim
         elif state == 'suppressed' or held_by or severity == 'known':
             kind = 'accepted'
@@ -1033,6 +1045,7 @@ def get_alerts() -> dict:
             'summary': notes.get('summary') or '', 'description': notes.get('description') or '',
             'runbook': notes.get('runbook') or notes.get('runbook_url') or '',
             'rule_id': labels.get('id'), 'review_after': labels.get('review_after'),
+            'expired': expired,
         })
 
     severity_rank = {'critical': 0, 'degraded': 1}

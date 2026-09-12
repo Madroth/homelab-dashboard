@@ -436,9 +436,16 @@ def build():
         if queue is None or not client_alive(client):
             return
         if not (poll and queue == state['queue']):
+            # The single-row fast path is only honest when the clicked item is the ONLY thing
+            # that changed. Otherwise it stored the whole refetched queue while drawing one
+            # row, so a change the daemon made to another item was recorded as shown -- and
+            # the poll, finding nothing new, never drew it (AntiGravity's review, 2026-09-11).
+            others_unchanged = ([i for i in state['queue'] if i['id'] != changed_id]
+                                == [i for i in queue if i['id'] != changed_id])
             state['queue'] = queue
             after_ids = [i['id'] for i in filtered_queue()]
-            if changed_id is not None and before_ids == after_ids and changed_id in row_refreshables:
+            if (changed_id is not None and before_ids == after_ids and others_unchanged
+                    and changed_id in row_refreshables):
                 _get_row_refreshable(changed_id).refresh()
             else:
                 render_queue.refresh()
