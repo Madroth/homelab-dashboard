@@ -64,13 +64,21 @@
   - [ ] **Phase 10 — digest view.** An auto-generated "your week in saves" view. *Done when:*
         it renders the week's articles. (The chat half of Phase 10 largely exists as
         `components/discuss_panel.py` with citations — check it against "answers from the
-        corpus with clickable citations" before building anything.) A pushed digest
-        *notification* would be intake's (its `DESIGN.md §10`), not this page's.
+        corpus with clickable citations" before building anything.) There is no digest
+        *notification*: Chris wants no success or digest pings, only failure alerts (intake
+        `DESIGN.md §10`, 2026-09-11), so the digest is a view he opens, nothing more.
   - [ ] **"Analyze this" button** — forces Tier-2 analysis on a filed article. The button is
         this page's; the force path is intake's Phase 11, so it waits on that.
   - [ ] **Human review of the tag editor and Education view.** Tag editor reviewed by Chris
         2026-09-11 ("looks good"); the tag-search box closing on every keystroke he found
         there is fixed (`25331e5`). Education view not confirmed.
+  - [ ] **Legacy analyses never reach the reader** (filed by homelab-intake, 2026-09-15).
+        `services/intake.py:get_article()` looks for `## Application Analysis\n+`, but 70
+        migrated articles head theirs `## Application Analysis (legacy, pre-redesign)`, so the
+        reader shows no analysis while the index says `tier2_present` and the card shows the
+        marker. Fix: allow `[^\n]*` after the heading text, as intake's `frontmatter.section()`
+        does. Intake rewrites the heading to the current form whenever it re-analyzes an
+        article, so the count shrinks over time but will not reach zero on its own.
   - [x] History carried over from intake's TODO, both done 2026-07-08: the Resubmit button,
         and card-clutter trimming (AI-preamble stripping, the `###` truncation fix, 3-tag cap).
   - Note: the **Tag Filtering** item below predates the tag menu (`render_tag_dropdown`,
