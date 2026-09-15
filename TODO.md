@@ -67,8 +67,14 @@
         corpus with clickable citations" before building anything.) There is no digest
         *notification*: Chris wants no success or digest pings, only failure alerts (intake
         `DESIGN.md §10`, 2026-09-11), so the digest is a view he opens, nothing more.
-  - [ ] **"Analyze this" button** — forces Tier-2 analysis on a filed article. The button is
-        this page's; the force path is intake's Phase 11, so it waits on that.
+  - [ ] **"Analyze this" button** — forces Tier-2 analysis on a filed article. **Unblocked
+        2026-09-15:** intake's force path is live. Append
+        `{id, url, status: "pending", action: "analyze", auto_generated: false, added_at}` to
+        `queue.json` under `queue.json.lock`, exactly as `resubmit_article()` does. The daemon
+        adds or refreshes the analysis and leaves title, summary, tags and scores alone
+        (intake `DESIGN.md §2`, contract in `§8`). Seconds to a couple of minutes over the
+        bridge. `retry_queue_item()` already preserves `action`. The queue panel shows only the
+        URL, so an analyze item looks like a Resubmit there — worth a label.
   - [ ] **Human review of the tag editor and Education view.** Tag editor reviewed by Chris
         2026-09-11 ("looks good"); the tag-search box closing on every keystroke he found
         there is fixed (`25331e5`). Education view not confirmed.
